@@ -112,7 +112,18 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
   `0f 85 f1 07 00 00` -> `90 90 90 90 90 90` (6x NOP).
   Dorenavant, si la Feature ID est 18, le wrapper LukeRoss ne declenche plus l'erreur et laisse s'executer le pipeline de creation de feature de maniere fluide.
 
+### 3.9 Le Cycle de Réinitialisation SwapChain/Device & Résolution Native en VR
+- **Observation dans `ReShade.log`** :
+  Lors de la bascule entre l'écran d'accueil/menu (résolution par défaut `8192x8192`) et le monde 3D réel (`4096x2928`), LukeRoss appelle `ResizeBuffers` pour reconfigurer la SwapChain stéréoscopique VR.
+  Ce redimensionnement amenait ReShade à décharger l'add-on RenoDX (`vtable::Unhook(NVSDK_NGX_D3D12_EvaluateFeature unhooked successfully)`) et à le recharger après que LukeRoss a déjà créé son nouveau handle DLSS 3D.
+- **Le Piège du Mode Upscaling en VR (`0xBAD00002`)** :
+  Lorsque `NREnableUpscaling=1`, RenoDX tente d'allouer des buffers intermédiaires démesurés (ex: `4819x4819 -> 8192x8192`), provoquant un dépassement de limites ou un rejet par le modèle neuronal `nvngx_dlssnr.dll` (`feature 18 create failed with 0xbad00002`).
+- **Solution Technique** :
+  Dans `ReShade.ini` : configurer `NREnableUpscaling=0`.
+  Cela force le mode **Native Neural Reconstruction (1:1)**. Le modèle DLSS 5 s'exécute directement à la résolution de sortie du casque VR (`4096x2928`), éliminant l'allocation intermédiaire excessive, la réinitialisation de pipeline et garantissant une stabilité sans crash VRAM.
+
 ---
+
 
 ## 4. Architecture de la Solution Finale (Dual-Proxy C++ & Outil Go)
 
