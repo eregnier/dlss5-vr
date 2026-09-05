@@ -82,6 +82,8 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
     Patch applique : `90 90 90 90 90 90` (6x NOP).
   - **A `0xdf91`** : instruction `0f 84 82 01 00 00` (`je 0xe117` vers vidage de pool).
     Patch applique : `90 90 90 90 90 90` (6x NOP).
+  - **A `0xa222`** : instruction `0f 85 78 01 00 00` (`jne +0x178` masquant les logs de frames > 1).
+    Patch applique : `90 90 90 90 90 90` (6x NOP) pour afficher le decompte de frames evaluees en continu.
 - **Resultat** : L'erreur d'epuisement de pool a ete definitivement eradiquee.
 
 ### 3.8 Le Blocage Fondamental de la Feature 18 par LukeRoss
