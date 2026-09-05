@@ -163,6 +163,11 @@ func updateReShadeIni(gameDir string) error {
 	iniPath := filepath.Join(gameDir, "ReShade.ini")
 	sections := parseIni(iniPath)
 
+	// Section PROXY (pour déléguer DirectInput au système Windows si ReShade est chargé en dinput8.dll)
+	proxy := getOrCreateSection(sections, "PROXY")
+	setKey(proxy, "EnableProxyLibrary", "1")
+	setKey(proxy, "ProxyLibrary", `C:\WINDOWS\system32\dinput8.dll`)
+
 	// Section GENERAL
 	general := getOrCreateSection(sections, "GENERAL")
 	setDefault(general, "EffectSearchPaths", `.\reshade-shaders\Shaders\**`)
