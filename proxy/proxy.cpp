@@ -241,68 +241,42 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, vo
     return 1;
 }
 
-static HMODULE g_hDLSSNR = NULL;
-static PFN_NVSDK_NGX_D3D12_CreateFeature g_pfnDLSSNR_Create = NULL;
-static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnDLSSNR_Evaluate = NULL;
-static PFN_NVSDK_NGX_D3D12_ReleaseFeature g_pfnDLSSNR_Release = NULL;
-
-static void* g_lastSeenHandle = NULL;
-static void* g_hFeature18 = NULL;
-static int g_createFeature18Result = -1;
+static HMODULE g_hRenoDX = NULL;
+static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnRenoDX_Evaluate = NULL;
 
 int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
 {
     InitProxy();
 
-    // 1. Charger nvngx_dlssnr.dll (le runtime DLSS 5 officiel)
-    if (!g_hDLSSNR)
+    // 1. Liaison dynamique au moteur neuronal RenoDX DLSS 5 (RVA 0x376C0)
+    if (!g_pfnRenoDX_Evaluate)
     {
-        g_hDLSSNR = LoadLibraryA("nvngx_dlssnr.dll");
-        if (g_hDLSSNR)
+        if (!g_hRenoDX) g_hRenoDX = GetModuleHandleA("renodx-dlss5.addon64");
+        if (g_hRenoDX)
         {
-            g_pfnDLSSNR_Create = (PFN_NVSDK_NGX_D3D12_CreateFeature)GetProcAddress(g_hDLSSNR, "NVSDK_NGX_D3D12_CreateFeature");
-            g_pfnDLSSNR_Evaluate = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)GetProcAddress(g_hDLSSNR, "NVSDK_NGX_D3D12_EvaluateFeature");
-            g_pfnDLSSNR_Release = (PFN_NVSDK_NGX_D3D12_ReleaseFeature)GetProcAddress(g_hDLSSNR, "NVSDK_NGX_D3D12_ReleaseFeature");
-            LogMsg("[VR-DLSS5] Successfully bound to official DLSS 5 Neural Reconstruction runtime (nvngx_dlssnr.dll)");
+            g_pfnRenoDX_Evaluate = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)((uintptr_t)g_hRenoDX + 0x376C0);
+            LogMsg("[VR-DLSS5] SUCCESS: Bound directly to RenoDX DLSS 5 Neural Reconstruction engine (RVA 0x376C0)!");
         }
     }
 
-    // 2. Instanciation automatique de la Feature 18 (DLSS 5 Neural Reconstruction)
-    if (g_pfnDLSSNR_Create && pCmdList && pParameters && pHandle != g_lastSeenHandle)
-    {
-        if (g_hFeature18 && g_pfnDLSSNR_Release)
-        {
-            g_pfnDLSSNR_Release(g_hFeature18);
-            g_hFeature18 = NULL;
-        }
-        g_lastSeenHandle = pHandle;
-
-        g_createFeature18Result = g_pfnDLSSNR_Create(pCmdList, 18, pParameters, &g_hFeature18);
-        char cbuf[256];
-        sprintf_s(cbuf, sizeof(cbuf), "[VR-DLSS5] NVSDK_NGX_D3D12_CreateFeature(FeatureId=18) returned 0x%08X, hFeature18=%p (game handle=%p)", 
-            g_createFeature18Result, g_hFeature18, pHandle);
-        LogMsg(cbuf);
-    }
-
-    // 3. Évaluation DLSS standard du jeu / LukeRoss
+    // 2. Évaluation DLSS standard du jeu / LukeRoss
     int result = 0;
     if (g_pfnNGXEvaluateFeature)
         result = g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
 
-    // 4. Dispatch Neural Reconstruction officiel continu
-    int nrResult = -1;
-    if (g_pfnDLSSNR_Evaluate && pCmdList && pParameters)
+    // 3. Dispatch continu vers le moteur neuronal DLSS 5 RenoDX (qui possède l'instance Feature 18 signée)
+    int renoResult = -1;
+    if (g_pfnRenoDX_Evaluate && pCmdList && pParameters)
     {
-        void* targetHandle = g_hFeature18 ? g_hFeature18 : pHandle;
-        nrResult = g_pfnDLSSNR_Evaluate(pCmdList, targetHandle, pParameters, pCallback);
+        renoResult = g_pfnRenoDX_Evaluate(pCmdList, pHandle, pParameters, pCallback);
     }
 
     g_evalFrameCounter++;
     if ((g_evalFrameCounter % 100) == 1 || g_evalFrameCounter <= 10)
     {
         char buf[256];
-        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Frame #%llu: gameHandle=%p, hFeature18=%p, evalNR_ret=0x%08X", 
-            g_evalFrameCounter, pHandle, g_hFeature18, nrResult);
+        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Frame #%llu: gameHandle=%p, renoEval=0x%08X (RenoDX Engine=%s)", 
+            g_evalFrameCounter, pHandle, renoResult, g_pfnRenoDX_Evaluate ? "ACTIVE" : "PENDING");
         LogMsg(buf);
     }
 
