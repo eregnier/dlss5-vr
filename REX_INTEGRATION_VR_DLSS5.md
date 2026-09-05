@@ -84,6 +84,9 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
   - **A `0xDFF5` (Patch Majeur - Pool Infini)** :
     `c6 42 60 01` -> `c6 42 60 00` (`mov byte ptr [rdx+0x60], 0`).
     La generation 0 reste perpetuellement marquee disponible et libre. Le pool ne s'epuise plus jamais et evalue en continu chaque frame.
+  - **A `0xA13F` (Debridage de l'Evaluation Continue)** :
+    `83 f8 08 74 59` (`cmp eax, 8; je 0xA191`) -> `74 59` remplace par `90 90` (2x NOP).
+    Neutralise le saut qui ignorait l'evaluation neuronale sur les passes subsequentes.
   - **A `0xe0df`** : instruction `0f 84 bd 00 00 00` (`je +0xbd` vers routine d'erreur) -> `90 90 90 90 90 90`.
   - **A `0xdf91`** : instruction `0f 84 82 01 00 00` (`je 0xe117` vers vidage de pool) -> `90 90 90 90 90 90`.
   - **A `0xa222`** : instruction `0f 85 78 01 00 00` (`jne +0x178` masquant les logs de frames > 1) -> `90 90 90 90 90 90` pour tracer en direct l'increment continu `count=N`.
