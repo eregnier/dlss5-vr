@@ -244,9 +244,21 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, vo
 static HMODULE g_hRenoDX = NULL;
 static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnRenoDX_Evaluate = NULL;
 
+static thread_local bool g_inRenoEvaluation = false;
+
 int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
 {
     InitProxy();
+
+    // 0. Protection anti-récursion essentielle :
+    // Quand RenoDX exécute son évaluation neuronale, il appelle en interne son pointeur
+    // de fonction original (qui pointe vers notre hook proxy). Sans ce verrou, récursion infinie et crash immédiat.
+    if (g_inRenoEvaluation)
+    {
+        if (g_pfnNGXEvaluateFeature)
+            return g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
+        return 0;
+    }
 
     // 1. Liaison dynamique au moteur neuronal RenoDX DLSS 5 (RVA 0x376C0)
     if (!g_pfnRenoDX_Evaluate)
@@ -259,16 +271,21 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, 
         }
     }
 
-    // 2. Évaluation DLSS standard du jeu / LukeRoss
     int result = 0;
-    if (g_pfnNGXEvaluateFeature)
-        result = g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
-
-    // 3. Dispatch continu vers le moteur neuronal DLSS 5 RenoDX (qui possède l'instance Feature 18 signée)
     int renoResult = -1;
+
     if (g_pfnRenoDX_Evaluate && pCmdList && pParameters)
     {
+        g_inRenoEvaluation = true;
+        // Dispatch continu vers RenoDX DLSS 5 (Feature 18 avec signed snippet et guides)
         renoResult = g_pfnRenoDX_Evaluate(pCmdList, pHandle, pParameters, pCallback);
+        g_inRenoEvaluation = false;
+        result = renoResult;
+    }
+    else if (g_pfnNGXEvaluateFeature)
+    {
+        // Repli standard si RenoDX n'est pas encore prêt
+        result = g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
     }
 
     g_evalFrameCounter++;
