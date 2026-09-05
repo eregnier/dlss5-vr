@@ -242,7 +242,13 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, vo
 }
 
 static HMODULE g_hDLSSNR = NULL;
+static PFN_NVSDK_NGX_D3D12_CreateFeature g_pfnDLSSNR_Create = NULL;
 static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnDLSSNR_Evaluate = NULL;
+static PFN_NVSDK_NGX_D3D12_ReleaseFeature g_pfnDLSSNR_Release = NULL;
+
+static void* g_lastSeenHandle = NULL;
+static void* g_hFeature18 = NULL;
+static int g_createFeature18Result = -1;
 
 int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
 {
@@ -254,29 +260,50 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, 
         g_hDLSSNR = LoadLibraryA("nvngx_dlssnr.dll");
         if (g_hDLSSNR)
         {
+            g_pfnDLSSNR_Create = (PFN_NVSDK_NGX_D3D12_CreateFeature)GetProcAddress(g_hDLSSNR, "NVSDK_NGX_D3D12_CreateFeature");
             g_pfnDLSSNR_Evaluate = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)GetProcAddress(g_hDLSSNR, "NVSDK_NGX_D3D12_EvaluateFeature");
+            g_pfnDLSSNR_Release = (PFN_NVSDK_NGX_D3D12_ReleaseFeature)GetProcAddress(g_hDLSSNR, "NVSDK_NGX_D3D12_ReleaseFeature");
             LogMsg("[VR-DLSS5] Successfully bound to official DLSS 5 Neural Reconstruction runtime (nvngx_dlssnr.dll)");
         }
+    }
+
+    // 2. Instanciation automatique de la Feature 18 (DLSS 5 Neural Reconstruction)
+    if (g_pfnDLSSNR_Create && pCmdList && pParameters && pHandle != g_lastSeenHandle)
+    {
+        if (g_hFeature18 && g_pfnDLSSNR_Release)
+        {
+            g_pfnDLSSNR_Release(g_hFeature18);
+            g_hFeature18 = NULL;
+        }
+        g_lastSeenHandle = pHandle;
+
+        g_createFeature18Result = g_pfnDLSSNR_Create(pCmdList, 18, pParameters, &g_hFeature18);
+        char cbuf[256];
+        sprintf_s(cbuf, sizeof(cbuf), "[VR-DLSS5] NVSDK_NGX_D3D12_CreateFeature(FeatureId=18) returned 0x%08X, hFeature18=%p (game handle=%p)", 
+            g_createFeature18Result, g_hFeature18, pHandle);
+        LogMsg(cbuf);
+    }
+
+    // 3. Évaluation DLSS standard du jeu / LukeRoss
+    int result = 0;
+    if (g_pfnNGXEvaluateFeature)
+        result = g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
+
+    // 4. Dispatch Neural Reconstruction officiel continu
+    int nrResult = -1;
+    if (g_pfnDLSSNR_Evaluate && pCmdList && pParameters)
+    {
+        void* targetHandle = g_hFeature18 ? g_hFeature18 : pHandle;
+        nrResult = g_pfnDLSSNR_Evaluate(pCmdList, targetHandle, pParameters, pCallback);
     }
 
     g_evalFrameCounter++;
     if ((g_evalFrameCounter % 100) == 1 || g_evalFrameCounter <= 10)
     {
-        char buf[128];
-        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Continuous evaluation frame #%llu (active handle %p, NR=%s)", 
-            g_evalFrameCounter, pHandle, g_pfnDLSSNR_Evaluate ? "ACTIVE" : "PASSTHROUGH");
+        char buf[256];
+        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Frame #%llu: gameHandle=%p, hFeature18=%p, evalNR_ret=0x%08X", 
+            g_evalFrameCounter, pHandle, g_hFeature18, nrResult);
         LogMsg(buf);
-    }
-
-    // 2. Évaluation DLSS standard du jeu / LukeRoss
-    int result = 0;
-    if (g_pfnNGXEvaluateFeature)
-        result = g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
-
-    // 3. Dispatch Neural Reconstruction continu si disponible
-    if (g_pfnDLSSNR_Evaluate && pCmdList && pParameters)
-    {
-        g_pfnDLSSNR_Evaluate(pCmdList, pHandle, pParameters, pCallback);
     }
 
     return result;

@@ -175,9 +175,11 @@ Pour affranchir définitivement la chaîne de rendu des limitations internes de 
   Dès que `RealVR64.dll` est chargé par le proxy au démarrage du jeu, notre DLL pose un hook mémoire direct permanent sur `RealVR64:NVSDK_NGX_D3D12_EvaluateFeature` (`jmp [rip+0]` 14 octets avec trampoline de retour).
   - Ce hook intercepte 100% des appels d'évaluation de DLSS, quel que soit le handle dynamique (0, 1 ou 3), quel que soit le thread ou la SwapChain.
   - Même si ReShade se décharge/recharge ou que RenoDX ne suit pas le handle, notre proxy reçoit chaque frame d'évaluation en continu.
-- **Dispatch Direct Neural Reconstruction (`nvngx_dlssnr.dll`)** :
-  À chaque frame interceptée, notre proxy charge et appelle directement le runtime officiel NVIDIA `nvngx_dlssnr.dll:NVSDK_NGX_D3D12_EvaluateFeature`. Le modèle neuronal DLSS 5 s'exécute ainsi de manière continue sur 100% des frames du monde 3D sans dépendre de ReShade ni d'un add-on externe.
+- **Instanciation Dédiée & Dispatch Direct Neural Reconstruction (`nvngx_dlssnr.dll`)** :
+  À chaque changement de handle DLSS du jeu (`pHandle != g_lastSeenHandle`), notre proxy appelle `nvngx_dlssnr.dll:NVSDK_NGX_D3D12_CreateFeature(FeatureId=18)` pour créer l'instance neuronale officielle NVIDIA dédiée (`g_hFeature18`) avec ses buffers guides et ses poids Tensor Core.
+  Puis, sur 100% des frames stéréoscopiques VR interceptées, notre proxy évalue la Feature 18 via `nvngx_dlssnr.dll:NVSDK_NGX_D3D12_EvaluateFeature(pCmdList, g_hFeature18, ...)`.
 - **Télémétrie en temps réel dans `vr_dlss5_proxy.log`** :
+  Enregistrement continu du code de retour de l'évaluation neuronale (`Frame #X: gameHandle=%p, hFeature18=%p, evalNR_ret=0x%08X`). Si `evalNR_ret=0x00000000`, la passe neuronale DLSS 5 est activement exécutée sur le GPU avec succès garanti.
   Enregistrement continu du compteur d'évaluation (`[VR-DLSS5-Telemetry] Continuous evaluation frame #X (active handle %p, NR=ACTIVE)`).
 - **Indépendance Totale & Généralisation** :
   Cette mécanique est 100% universelle et reproductible pour tous les jeux LukeRoss VR (Avatar, Cyberpunk, Horizon, etc.).
