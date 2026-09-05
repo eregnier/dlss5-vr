@@ -149,7 +149,8 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
    - Débridage du pool de travail à `0xDFF5` (`c6 42 60 00`) dans renodx-dlss5.addon64
    - Débridage de l'évaluation continue à `0xA13F` (`90 90`) dans renodx-dlss5.addon64
    - Bypass des erreurs de fence et de pool aux offsets `0xE0DF`, `0xDF91`, `0xA222`.
-   - Débridage dynamique `ANY_HANDLE` sur l'ensemble des 8 slots RenoDX (offsets `0x36EA8 + i*0x4C0`, `75 56` -> `90 90` et offsets `0x36E9B + i*0x4C0`, `74 63` -> `90 90`) dans `renodx-dlss5.addon64`. Cette découverte majeure permise par la cartographie binaire complète montre que RenoDX alloue 8 structures de slots d'évaluation séparées (espacées d'exactement 0x4C0 octets = 1216 octets) ; chacune possédait ses propres sauts d'abandon conditionnels (rejet du handle différent du slot 0 et vérification de pointeur nul sautant l'évaluation). Les 8 slots sont désormais totalement débridés.
+   - Débridage dynamique `ANY_HANDLE` sur l'ensemble des 8 slots RenoDX (offsets `0x36EA8 + i*0x4C0`, `75 56` -> `90 90`, offsets `0x36E9B + i*0x4C0`, `74 63` -> `90 90`, et offsets `0x36F2E + i*0x4C0`, `75 60` -> `90 90`) dans `renodx-dlss5.addon64`. Cette découverte majeure permise par la cartographie binaire complète montre que RenoDX alloue 8 structures de slots d'évaluation séparées (espacées d'exactement 0x4C0 octets = 1216 octets) ; chacune possédait ses propres sauts d'abandon conditionnels (rejet du handle différent du slot 0, vérification de pointeur nul sautant l'évaluation, et saut conditionnel dl-skip sautant l'envoi de la passe neuronale). Les 8 slots sont désormais totalement débridés.
+
 
 ### 4.3 Architecture Souveraine : Interception Directe NGX & Télémétrie Continue
 Pour affranchir définitivement la chaîne de rendu des limitations internes de suivi d'état de RenoDX (qui traite les slots d'écrans plats 2D et abandonne lors de la création dynamique de handles stéréoscopiques `[3]` en 3D VR) :

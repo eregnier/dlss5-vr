@@ -267,11 +267,18 @@ func ensureLukeRossCompatibility(gameDir, proxyTarget string) {
 				copy(aData[nullOff:nullOff+2], []byte{0x90, 0x90})
 				aModified = true
 			}
+			// Offset 0x36F2E + s*0x4C0 : 75 60 -> 90 90 (bypass dl-skip sautant l'envoi de la frame neuronale)
+			skipOff := 0x36F2E + s*0x4C0
+			if len(aData) > skipOff+2 && bytes.Equal(aData[skipOff:skipOff+2], []byte{0x75, 0x60}) {
+				copy(aData[skipOff:skipOff+2], []byte{0x90, 0x90})
+				aModified = true
+			}
 		}
 
 		if aModified {
 			_ = os.WriteFile(addonPath, aData, 0644)
 		}
+
 
 
 	}
