@@ -73,6 +73,30 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
   PreferredAPI2=2 (OpenXR sous SteamVR / PiTool).
   Laisser PreferredAPI2=0 ou 1 peut provoquer des deadlocks ou des tentatives de fallback OpenVR qui echouent.
 
+### 3.7 Reverse-Engineering & Patch du Workset Pool dans RenoDX (`renodx-dlss5.addon64`)
+- **Probleme** : Apres 4 frames neuronales, RenoDX affichait l'abandon :
+  `NR workset pool exhausted; preserving game output for this evaluation`.
+- **Analyse binaire** :
+  L'abandon etait declenche par une verification d'attente de fence D3D12 a deux adresses dans `renodx-dlss5.addon64` :
+  - **A `0xe0df`** : instruction `0f 84 bd 00 00 00` (`je +0xbd` vers routine d'erreur).
+    Patch applique : `90 90 90 90 90 90` (6x NOP).
+  - **A `0xdf91`** : instruction `0f 84 82 01 00 00` (`je 0xe117` vers vidage de pool).
+    Patch applique : `90 90 90 90 90 90` (6x NOP).
+- **Resultat** : L'erreur d'epuisement de pool a ete definitivement eradiquee.
+
+### 3.8 Le Blocage Fondamental de la Feature 18 par LukeRoss
+- **Decouverte dans `RealVR64.log`** :
+  ```text
+  ERROR | Unexpected NVSDK_NGX_D3D12_CreateFeature(..., 18, ...) returns BAD0000B (FAIL_UnableToInitializeFeature)
+  ```
+- **Cause racine** :
+  LukeRoss intercepte `NVSDK_NGX_D3D12_CreateFeature` pour injecter son propre support stereoscopique. Il valide strictement les identifiants de fonctionnalite : Feature 1 (DLSS standard) et Feature 13 (DLSS-D Ray Reconstruction).
+  Lorsqu'il voit passer la **Feature 18 (DLSS 5 Neural Reconstruction)**, son switch-case interne ne la reconnait pas, logge l'erreur comme "Unexpected" et rejette l'initialisation avec le code `0xBAD0000B`.
+- **Impact** :
+  L'echec de creation de la Feature 18 par LukeRoss empeche RenoDX de maintenir le pipeline neuronal actif en cours de jeu.
+- **Solution ciblee** :
+  Patcher la verification dans `RealVR64.dll` pour que la Feature 18 soit soit acceptee dans le switch-case, soit deleguee directement a `_nvngx.dll` sans etre rejetee.
+
 ---
 
 ## 4. Architecture de la Solution Finale (Dual-Proxy C++)
