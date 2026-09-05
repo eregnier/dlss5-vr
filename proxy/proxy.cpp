@@ -1,0 +1,170 @@
+#include <windows.h>
+#include <stdio.h>
+
+typedef HRESULT (WINAPI *PFN_CreateDXGIFactory)(REFIID riid, void **ppFactory);
+typedef HRESULT (WINAPI *PFN_CreateDXGIFactory1)(REFIID riid, void **ppFactory);
+typedef HRESULT (WINAPI *PFN_CreateDXGIFactory2)(UINT Flags, REFIID riid, void **ppFactory);
+typedef HRESULT (WINAPI *PFN_DXGIDeclareAdapterRemovalSupport)();
+typedef HRESULT (WINAPI *PFN_DXGIGetDebugInterface1)(UINT Flags, REFIID riid, void **pDebug);
+
+static HMODULE g_hRealVR = NULL;
+static HMODULE g_hReShade = NULL;
+static HMODULE g_hSysDxgi = NULL;
+
+static PFN_CreateDXGIFactory g_pfnCreateDXGIFactory = NULL;
+static PFN_CreateDXGIFactory1 g_pfnCreateDXGIFactory1 = NULL;
+static PFN_CreateDXGIFactory2 g_pfnCreateDXGIFactory2 = NULL;
+static PFN_DXGIDeclareAdapterRemovalSupport g_pfnDXGIDeclareAdapterRemovalSupport = NULL;
+static PFN_DXGIGetDebugInterface1 g_pfnDXGIGetDebugInterface1 = NULL;
+
+static void LogMsg(const char *msg)
+{
+    FILE *f = fopen("vr_dlss5_proxy.log", "a");
+    if (f)
+    {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
+}
+
+static void InitProxy()
+{
+    static BOOL initialized = FALSE;
+    if (initialized) return;
+    initialized = TRUE;
+
+    LogMsg("[Proxy] Initializing VR-DLSS5 Dual Proxy...");
+
+    // 1. Charger RealVR64.dll (LukeRoss VR mod) d'abord
+    g_hRealVR = LoadLibraryA("RealVR64.dll");
+    if (g_hRealVR)
+    {
+        LogMsg("[Proxy] Successfully loaded RealVR64.dll");
+        g_pfnCreateDXGIFactory = (PFN_CreateDXGIFactory)GetProcAddress(g_hRealVR, "CreateDXGIFactory");
+        g_pfnCreateDXGIFactory1 = (PFN_CreateDXGIFactory1)GetProcAddress(g_hRealVR, "CreateDXGIFactory1");
+        g_pfnCreateDXGIFactory2 = (PFN_CreateDXGIFactory2)GetProcAddress(g_hRealVR, "CreateDXGIFactory2");
+        g_pfnDXGIDeclareAdapterRemovalSupport = (PFN_DXGIDeclareAdapterRemovalSupport)GetProcAddress(g_hRealVR, "DXGIDeclareAdapterRemovalSupport");
+        g_pfnDXGIGetDebugInterface1 = (PFN_DXGIGetDebugInterface1)GetProcAddress(g_hRealVR, "DXGIGetDebugInterface1");
+    }
+    else
+    {
+        LogMsg("[Proxy] WARNING: RealVR64.dll not found, falling back to system dxgi.dll");
+    }
+
+    // 2. Charger ReShade 6.8 (DLSS 5 host) ensuite
+    g_hReShade = LoadLibraryA("ReShade64_dlss5.dll");
+    if (g_hReShade)
+    {
+        LogMsg("[Proxy] Successfully loaded ReShade64_dlss5.dll");
+    }
+    else
+    {
+        LogMsg("[Proxy] WARNING: Could not load ReShade64_dlss5.dll");
+    }
+
+    // 3. Repli de secours vers system32 dxgi si une fonction n'est pas dans RealVR
+    char sysPath[MAX_PATH];
+    GetSystemDirectoryA(sysPath, MAX_PATH);
+    strcat_s(sysPath, MAX_PATH, "\\dxgi.dll");
+    g_hSysDxgi = LoadLibraryA(sysPath);
+
+    if (g_hSysDxgi)
+    {
+        if (!g_pfnCreateDXGIFactory) g_pfnCreateDXGIFactory = (PFN_CreateDXGIFactory)GetProcAddress(g_hSysDxgi, "CreateDXGIFactory");
+        if (!g_pfnCreateDXGIFactory1) g_pfnCreateDXGIFactory1 = (PFN_CreateDXGIFactory1)GetProcAddress(g_hSysDxgi, "CreateDXGIFactory1");
+        if (!g_pfnCreateDXGIFactory2) g_pfnCreateDXGIFactory2 = (PFN_CreateDXGIFactory2)GetProcAddress(g_hSysDxgi, "CreateDXGIFactory2");
+        if (!g_pfnDXGIDeclareAdapterRemovalSupport) g_pfnDXGIDeclareAdapterRemovalSupport = (PFN_DXGIDeclareAdapterRemovalSupport)GetProcAddress(g_hSysDxgi, "DXGIDeclareAdapterRemovalSupport");
+        if (!g_pfnDXGIGetDebugInterface1) g_pfnDXGIGetDebugInterface1 = (PFN_DXGIGetDebugInterface1)GetProcAddress(g_hSysDxgi, "DXGIGetDebugInterface1");
+    }
+    LogMsg("[Proxy] Proxy ready.");
+}
+
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+{
+    if (fdwReason == DLL_PROCESS_ATTACH)
+    {
+        DisableThreadLibraryCalls(hinstDLL);
+        InitProxy();
+    }
+    return TRUE;
+}
+
+extern "C" {
+
+HRESULT WINAPI Proxy_CreateDXGIFactory(REFIID riid, void **ppFactory)
+{
+    InitProxy();
+    LogMsg("[Proxy] Proxy_CreateDXGIFactory called");
+    if (g_pfnCreateDXGIFactory) return g_pfnCreateDXGIFactory(riid, ppFactory);
+    return E_FAIL;
+}
+
+HRESULT WINAPI Proxy_CreateDXGIFactory1(REFIID riid, void **ppFactory)
+{
+    InitProxy();
+    LogMsg("[Proxy] Proxy_CreateDXGIFactory1 called");
+    if (g_pfnCreateDXGIFactory1) return g_pfnCreateDXGIFactory1(riid, ppFactory);
+    return E_FAIL;
+}
+
+HRESULT WINAPI Proxy_CreateDXGIFactory2(UINT Flags, REFIID riid, void **ppFactory)
+{
+    InitProxy();
+    LogMsg("[Proxy] Proxy_CreateDXGIFactory2 called");
+    if (g_pfnCreateDXGIFactory2) return g_pfnCreateDXGIFactory2(Flags, riid, ppFactory);
+    return E_FAIL;
+}
+
+HRESULT WINAPI Proxy_DXGIDeclareAdapterRemovalSupport()
+{
+    InitProxy();
+    if (g_pfnDXGIDeclareAdapterRemovalSupport) return g_pfnDXGIDeclareAdapterRemovalSupport();
+    return S_OK;
+}
+
+HRESULT WINAPI Proxy_DXGIGetDebugInterface1(UINT Flags, REFIID riid, void **pDebug)
+{
+    InitProxy();
+    if (g_pfnDXGIGetDebugInterface1) return g_pfnDXGIGetDebugInterface1(Flags, riid, pDebug);
+    return E_FAIL;
+}
+
+static void* ResolveProc(const char *name)
+{
+    void *p = NULL;
+    if (g_hRealVR) p = (void*)GetProcAddress(g_hRealVR, name);
+    if (!p && g_hSysDxgi) p = (void*)GetProcAddress(g_hSysDxgi, name);
+    return p;
+}
+
+#define FORWARD_VOID(name) \
+    typedef void (WINAPI *PFN_##name)(); \
+    static PFN_##name s_pfn_##name = NULL; \
+    if (!s_pfn_##name) s_pfn_##name = (PFN_##name)ResolveProc(#name); \
+    if (s_pfn_##name) { s_pfn_##name(); return S_OK; } \
+    return S_OK;
+
+#define FORWARD_HR(name) \
+    typedef HRESULT (WINAPI *PFN_##name)(); \
+    static PFN_##name s_pfn_##name = NULL; \
+    if (!s_pfn_##name) s_pfn_##name = (PFN_##name)ResolveProc(#name); \
+    if (s_pfn_##name) return s_pfn_##name(); \
+    return S_OK;
+
+HRESULT WINAPI Proxy_ApplyCompatResolutionQuirking() { InitProxy(); FORWARD_HR(ApplyCompatResolutionQuirking); }
+HRESULT WINAPI Proxy_CompatString() { InitProxy(); FORWARD_HR(CompatString); }
+HRESULT WINAPI Proxy_CompatValue() { InitProxy(); FORWARD_HR(CompatValue); }
+HRESULT WINAPI Proxy_DXGID3D10CreateDevice() { InitProxy(); FORWARD_HR(DXGID3D10CreateDevice); }
+HRESULT WINAPI Proxy_DXGID3D10CreateLayeredDevice() { InitProxy(); FORWARD_HR(DXGID3D10CreateLayeredDevice); }
+HRESULT WINAPI Proxy_DXGID3D10GetLayeredDeviceSize() { InitProxy(); FORWARD_HR(DXGID3D10GetLayeredDeviceSize); }
+HRESULT WINAPI Proxy_DXGID3D10RegisterLayers() { InitProxy(); FORWARD_HR(DXGID3D10RegisterLayers); }
+HRESULT WINAPI Proxy_DXGIDisableVBlankVirtualization() { InitProxy(); FORWARD_HR(DXGIDisableVBlankVirtualization); }
+HRESULT WINAPI Proxy_DXGIDumpJournal() { InitProxy(); FORWARD_HR(DXGIDumpJournal); }
+HRESULT WINAPI Proxy_DXGIReportAdapterConfiguration() { InitProxy(); FORWARD_HR(DXGIReportAdapterConfiguration); }
+HRESULT WINAPI Proxy_PIXBeginCapture() { InitProxy(); FORWARD_HR(PIXBeginCapture); }
+HRESULT WINAPI Proxy_PIXEndCapture() { InitProxy(); FORWARD_HR(PIXEndCapture); }
+HRESULT WINAPI Proxy_PIXGetCaptureState() { InitProxy(); FORWARD_HR(PIXGetCaptureState); }
+HRESULT WINAPI Proxy_SetAppCompatStringPointer() { InitProxy(); FORWARD_HR(SetAppCompatStringPointer); }
+HRESULT WINAPI Proxy_UpdateHMDEmulationStatus() { InitProxy(); FORWARD_HR(UpdateHMDEmulationStatus); }
+
+}
