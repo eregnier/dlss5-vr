@@ -247,6 +247,20 @@ func ensureLukeRossCompatibility(gameDir, proxyTarget string) {
 			aModified = true
 		}
 
+		// Offset 0xDF64 : 0f 84 8b 00 00 00 -> e9 8c 00 00 00 90 (force recyclage immédiat du slot de travail sans attendre de fence de swapchain absente en VR)
+		df64Off := 0xDF64
+		if len(aData) > df64Off+6 && bytes.Equal(aData[df64Off:df64Off+6], []byte{0x0f, 0x84, 0x8b, 0x00, 0x00, 0x00}) {
+			copy(aData[df64Off:df64Off+6], []byte{0xe9, 0x8c, 0x00, 0x00, 0x00, 0x90})
+			aModified = true
+		}
+
+		// Offset 0xDF97 : 31 c0 e9 a1 02 00 00 -> e9 59 00 00 00 90 90 (filet de sécurité universel : saut direct vers DFF5, empêche tout retour NULL du pool)
+		df97Off := 0xDF97
+		if len(aData) > df97Off+7 && bytes.Equal(aData[df97Off:df97Off+7], []byte{0x31, 0xc0, 0xe9, 0xa1, 0x02, 0x00, 0x00}) {
+			copy(aData[df97Off:df97Off+7], []byte{0xe9, 0x59, 0x00, 0x00, 0x00, 0x90, 0x90})
+			aModified = true
+		}
+
 		// Offset 0xA222 : 0f 85 78 01 00 00 -> 90 90 90 90 90 90 (log throttle bypass)
 		logOff := 0xA222
 		if len(aData) > logOff+6 && bytes.Equal(aData[logOff:logOff+6], []byte{0x0f, 0x85, 0x78, 0x01, 0x00, 0x00}) {

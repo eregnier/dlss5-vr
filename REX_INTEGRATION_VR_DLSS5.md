@@ -122,6 +122,23 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
   Dans `ReShade.ini` : configurer `NREnableUpscaling=0`.
   Cela force le mode **Native Neural Reconstruction (1:1)**. Le modèle DLSS 5 s'exécute directement à la résolution de sortie du casque VR (`4096x2928`), éliminant l'allocation intermédiaire excessive, la réinitialisation de pipeline et garantissant une stabilité sans crash VRAM.
 
+### 3.10 La Cause Racine de l'Arrêt à 4 Frames : Le Recyclage des Fences VR du Workset Pool
+- **Symptôme** : RenoDX évaluait parfaitement les frames 1 à 4 (`inline feature 18 evaluation succeeded (count=1..4)`), puis cessait toute évaluation alors que le jeu et le proxy continuaient à tourner indéfiniment.
+- **Dissection Binaire du Pool de Travail (`0xDF50` à `0xE020`)** :
+  1. RenoDX alloue jusqu'à 4 générations de travail (scratch generations 0 à 3) vérifiées à l'offset `0xDF7B` (`cmp rcx, 4 ; jb 0xDF9D`).
+  2. Chaque génération possède un drapeau d'occupation à `[rdx + 0x60]`. En mode écran plat standard, les fences D3D12 déclenchées par `Present` réinitialisent ce drapeau à `0`.
+  3. En VR sous le mod LukeRoss, les commandes sont soumises via des queues dédiées ou interceptées hors du flux swapchain standard de ReShade. Le drapeau `[rdx + 0x60]` restait donc perpétuellement à `1`.
+  4. Dès la 5e frame, la boucle d'inspection des slots (`0xDF60: cmp byte ptr [rdx + 0x60], 0 ; je 0xDFF5`) parcourait les 4 slots sans en trouver un seul de « libre ». Elle tombait alors sur `0xDF97` :
+     ```x86asm
+     0xDF97: 31 c0          ; xor eax, eax (renvoie NULL !)
+     0xDF99: e9 a1 02 00 00 ; jmp sortie (échec d'allocation du workset)
+     ```
+     À partir de cet instant, tout appel ultérieur échouait et aucune passe neuronale DLSS 5 n'était soumise au GPU.
+- **Solution & Patches Universels Appliqués** :
+  - **À `0xDF64`** : `0f 84 8b 00 00 00` remplacé par `e9 8c 00 00 00 90` (`jmp 0xDFF5 ; nop`). Le slot inspecté est réutilisé immédiatement de manière circulaire sans attendre une fence inexistante en VR.
+  - **À `0xDF97`** : `31 c0 e9 a1 02 00 00` remplacé par `e9 59 00 00 00 90 90` (`jmp 0xDFF5 ; nop ; nop`). Filet de sécurité absolu : même en cas de dépassement, le pool branche directement sur l'allocation active sans jamais renvoyer NULL.
+  - **Résultat** : DLSS 5 évalue en continu 100% des frames en VR sans interruption.
+
 ---
 
 
