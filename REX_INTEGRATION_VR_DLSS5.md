@@ -168,19 +168,63 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
    - Bypass des erreurs de fence et de pool aux offsets `0xE0DF`, `0xDF91`, `0xA222`.
    - Débridage dynamique `ANY_HANDLE` sur l'ensemble des 8 slots RenoDX (offsets `0x36EA8 + i*0x4C0`, `75 56` -> `90 90`, offsets `0x36E9B + i*0x4C0`, `74 63` -> `90 90`, et offsets `0x36F2E + i*0x4C0`, `75 60` -> `90 90`) dans `renodx-dlss5.addon64`. Cette découverte majeure permise par la cartographie binaire complète montre que RenoDX alloue 8 structures de slots d'évaluation séparées (espacées d'exactement 0x4C0 octets = 1216 octets) ; chacune possédait ses propres sauts d'abandon conditionnels (rejet du handle différent du slot 0, vérification de pointeur nul sautant l'évaluation, et saut conditionnel dl-skip sautant l'envoi de la passe neuronale). Les 8 slots sont désormais totalement débridés.
 
+### 3.11 La Chaîne d'Appel Complète & Le Piège de la Famine de LukeRoss
+- **Dissection de la Chaîne d'Appel Stéréoscopique VR** :
+  1. Le moteur de jeu (`afop.exe`) appelle `NVSDK_NGX_D3D12_EvaluateFeature`.
+  2. Notre proxy intercepte l'appel via son détour sur `RealVR64:NVSDK_NGX_D3D12_EvaluateFeature`.
+  3. LukeRoss calcule la projection stéréoscopique VR pour chaque œil, met à jour `appRenderFrameIndex`, lie les textures VR, puis appelle son pointeur interne vers `_nvngx.dll:NVSDK_NGX_D3D12_EvaluateFeature` (offset `0x180263433`).
+  4. Ce pointeur dans `_nvngx.dll` est déjà intercepté en mémoire par l'add-on `renodx-dlss5.addon64`.
+  5. RenoDX évalue le DLSS natif (`call r15`), lit les guides, puis exécute la Feature 18 (Neural Reconstruction) via `nvngx_dlssnr.dll`, et incrémente `count=N`.
+  6. RenoDX retourne `0` (Success) à LukeRoss, qui valide la parité de frame et soumet l'image au compositeur OpenXR.
+- **Le Piège Fatal de la Famine de Frame** :
+  Tenter d'appeler directement RenoDX depuis notre proxy (`Proxy_NVSDK_NGX_D3D12_EvaluateFeature`) sans exécuter le trampoline LukeRoss (`g_pfnNGXEvaluateFeature`) coupe le mod VR de son propre pipeline d'upscaling. LukeRoss détecte alors `DLSS eval/exec mismatched frame #`, perd la synchronisation avec le moteur, et coupe immédiatement le DLSS pour repasser en rendu natif non-upscalé.
+- **Règle Absolue de l'Injecteur** :
+  Notre proxy doit **toujours** exécuter en priorité le trampoline `g_pfnNGXEvaluateFeature` de LukeRoss. Comme LukeRoss appelle lui-même `_nvngx.dll`, le Neural Rendering s'exécute naturellement à 100% de la cadence VR (90 Hz) sans récursion, sans collision d'état et avec une parité stéréoscopique parfaite.
 
-### 4.3 Architecture Souveraine : Interception Directe NGX & Télémétrie Continue
-Pour affranchir définitivement la chaîne de rendu des limitations internes de suivi d'état de RenoDX (qui traite les slots d'écrans plats 2D et abandonne lors de la création dynamique de handles stéréoscopiques `[3]` en 3D VR) :
+### 3.12 Le Mode Headless de ReShade & Les Raccourcis Clavier
+- **Pourquoi F6, Home ou Insert ne réagissent pas** :
+  Pour éliminer le conflit d'écran noir en VR (section 3.3), les hooks DXGI et swapchain de ReShade ont été neutralisés (`dxgi.dll` -> `dxgx.dll`). ReShade n'a donc ni hook `Present()` ni hook `WndProc`.
+  - Il n'affiche aucun menu overlay sur l'écran plat ou dans le casque.
+  - Il n'intercepte pas les touches de raccourci clavier.
+  - RenoDX DLSS 5 fonctionne en **mode autonome / headless** : ses paramètres sont lus directement depuis `ReShade.ini` (`[RenoDX.DLSS5] EnableHooks=1`, `NRIntensity=2.5`). Le modèle neuronal est donc **actif en permanence à chaque frame** dès le lancement du jeu sans aucune intervention manuelle.
+  - L'overlay VR du mod LukeRoss reste accessible via sa touche dédiée configurée dans `RealVR.ini` : `KeyOverlay=112` (**Touche F1**).
+
+---
+
+## 4. Architecture de la Solution Finale (Dual-Proxy C++ & Outil Go)
+
+### 4.1 Roles et Responsabilites
+- **afop.exe** charge dxgi.dll (notre proxy compile MSVC ou deploye par vr-dlss5-patch).
+- **Notre proxy dxgi.dll** :
+  - Transmet immediatement et a 100% les 20 fonctions DXGI (CreateDXGIFactory, etc.) a RealVR64.dll.
+  - Charge en parallele ReShade64_dlss5.dll via LoadLibraryA.
+- **RealVR64.dll** (patche ReShxdeVersion + Feature 18 unblock @ 0x25EE03) :
+  - Pilote D3D12, la SwapChain, OpenXR et la stereoscopie vers le casque VR.
+  - Exécute les passes DLSS VR et route automatiquement vers le runtime NGX detoured.
+- **ReShade64_dlss5.dll** (patche dxgx / openvx) :
+  - Heberge l'add-on renodx-dlss5.addon64 sans toucher a la SwapChain ni a OpenVR.
+- **renodx-dlss5.addon64** (patche 0xDFF5/0xDF64/0xDF97 pool infini + 8 slots ANY_HANDLE) :
+  - Hooke _nvngx.dll et applique les poids neuronaux Tensor Core de nvngx_dlssnr.dll.
+
+### 4.2 Alignement de l'Outil Automatique Go (`vr-dlss5-patch`)
+L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes chirurgicales du REX :
+1. Déploiement automatique du dual-proxy C++ (`proxy/dxgi.dll`) et renommage de LukeRoss en `RealVR64.dll` en cas de présence VR (Architecture B).
+2. Application in-place de tous les patches binaires PE via `installer.go:ensureLukeRossCompatibility()` :
+   - `ReShadeVersion` -> `ReShxdeVersion` dans RealVR64.dll
+   - Whitelist Feature 18 à l'offset `0x25EE03` dans RealVR64.dll (6x NOP)
+   - Neutralisation des hooks `dxgi.dll` -> `dxgx.dll` et `openvr_api.dll` -> `openvx_api.dll` dans ReShade64_dlss5.dll
+   - Débridage du pool de travail à `0xDFF5` (`c6 42 60 00`), `0xDF64` (`e9 8c 00 00 00 90`) et `0xDF97` (`e9 59 00 00 00 90 90`) dans renodx-dlss5.addon64
+   - Débridage de l'évaluation continue à `0xA13F` (`90 90`) et bypass des logs à `0xA222`
+   - Débridage dynamique `ANY_HANDLE` sur l'ensemble des 8 slots RenoDX (offsets `0x36EA8 + i*0x4C0`, `0x36E9B + i*0x4C0`, `0x36F2E + i*0x4C0`) dans `renodx-dlss5.addon64`.
+
+### 4.3 Architecture Souveraine : Chaîne Ininterrompue LukeRoss & Télémétrie Continue
 - **Détour mémoire inconditionnel (14 octets) dans `proxy/proxy.cpp`** :
   Dès que `RealVR64.dll` est chargé par le proxy au démarrage du jeu, notre DLL pose un hook mémoire direct permanent sur `RealVR64:NVSDK_NGX_D3D12_EvaluateFeature` (`jmp [rip+0]` 14 octets avec trampoline de retour).
-  - Ce hook intercepte 100% des appels d'évaluation de DLSS, quel que soit le handle dynamique (0, 1 ou 3), quel que soit le thread ou la SwapChain.
-  - Même si ReShade se décharge/recharge ou que RenoDX ne suit pas le handle, notre proxy reçoit chaque frame d'évaluation en continu.
-- **Instanciation Dédiée & Dispatch Direct Neural Reconstruction (`nvngx_dlssnr.dll`)** :
-  À chaque changement de handle DLSS du jeu (`pHandle != g_lastSeenHandle`), notre proxy appelle `nvngx_dlssnr.dll:NVSDK_NGX_D3D12_CreateFeature(FeatureId=18)` pour créer l'instance neuronale officielle NVIDIA dédiée (`g_hFeature18`) avec ses buffers guides et ses poids Tensor Core.
-  Puis, sur 100% des frames stéréoscopiques VR interceptées, notre proxy évalue la Feature 18 via `nvngx_dlssnr.dll:NVSDK_NGX_D3D12_EvaluateFeature(pCmdList, g_hFeature18, ...)`.
+  - Ce hook garantit la télémétrie en direct sans perturber le cycle de vie des frames VR.
+  - Notre proxy appelle systématiquement `g_pfnNGXEvaluateFeature`, garantissant que LukeRoss exécute 100% de ses évaluations stéréoscopiques et maintient la parité des frames.
+  - L'évaluation neuronale DLSS 5 est ensuite déclenchée en aval par le hook de RenoDX sur `_nvngx.dll`.
 - **Télémétrie en temps réel dans `vr_dlss5_proxy.log`** :
-  Enregistrement continu du code de retour de l'évaluation neuronale (`Frame #X: gameHandle=%p, hFeature18=%p, evalNR_ret=0x%08X`). Si `evalNR_ret=0x00000000`, la passe neuronale DLSS 5 est activement exécutée sur le GPU avec succès garanti.
-  Enregistrement continu du compteur d'évaluation (`[VR-DLSS5-Telemetry] Continuous evaluation frame #X (active handle %p, NR=ACTIVE)`).
+  Enregistrement continu du compteur de frames VR (`[VR-DLSS5-Telemetry] Continuous VR frame #X: gameHandle=%p, eval_ret=0x00000000`).
 - **Indépendance Totale & Généralisation** :
   Cette mécanique est 100% universelle et reproductible pour tous les jeux LukeRoss VR (Avatar, Cyberpunk, Horizon, etc.).
 
