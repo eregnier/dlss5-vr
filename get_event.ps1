@@ -1,0 +1,1 @@
+Get-WinEvent -ProviderName 'Application Error' -MaxEvents 1 | Format-List TimeCreated, Message

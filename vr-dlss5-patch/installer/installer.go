@@ -2,6 +2,7 @@ package installer
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ type InstallPlan struct {
 	AddonPath      string
 	ModelPath      string
 	BridgePath     string
+	DualProxyPath  string // Optionnel: chemin vers le proxy dxgi.dll C++ compilé (Architecture B)
 }
 
 // Install applique le patch dans le répertoire du jeu selon l'analyse GameInfo.
@@ -26,16 +28,58 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 
 	gameDir := info.GameDir
 
-	// 1. Déploiement de ReShade
-	destProxy := filepath.Join(gameDir, info.ProxyTarget)
-	if dryRun {
-		actions = append(actions, fmt.Sprintf("Copier ReShade -> %s", destProxy))
-	} else {
-		if err := copyFile(plan.ReShadeDllPath, destProxy); err != nil {
-			return nil, fmt.Errorf("erreur déploiement ReShade (%s): %w", info.ProxyTarget, err)
+	// Architecture B : Si LukeRoss est présent et qu'un proxy C++ est fourni
+	if info.HasLukeRoss && plan.DualProxyPath != "" {
+		// 1a. Renommer dxgi.dll (LukeRoss) -> RealVR64.dll s'il n'est pas déjà renommé
+		oldDxgi := filepath.Join(gameDir, "dxgi.dll")
+		realVR64 := filepath.Join(gameDir, "RealVR64.dll")
+		if _, err := os.Stat(realVR64); os.IsNotExist(err) {
+			if _, errDx := os.Stat(oldDxgi); errDx == nil {
+				if dryRun {
+					actions = append(actions, "Renommer dxgi.dll (LukeRoss) -> RealVR64.dll")
+				} else {
+					_ = os.Rename(oldDxgi, realVR64)
+					installedFiles = append(installedFiles, "RealVR64.dll")
+					actions = append(actions, "Renommé: dxgi.dll (LukeRoss) -> RealVR64.dll")
+				}
+			}
 		}
-		installedFiles = append(installedFiles, info.ProxyTarget)
-		actions = append(actions, fmt.Sprintf("Installé: ReShade en tant que %s", info.ProxyTarget))
+
+		// 1b. Déployer ReShade 6.8 sous le nom ReShade64_dlss5.dll
+		destReShade := filepath.Join(gameDir, "ReShade64_dlss5.dll")
+		if dryRun {
+			actions = append(actions, "Copier ReShade -> ReShade64_dlss5.dll")
+		} else {
+			if err := copyFile(plan.ReShadeDllPath, destReShade); err != nil {
+				return nil, fmt.Errorf("erreur déploiement ReShade64_dlss5.dll: %w", err)
+			}
+			installedFiles = append(installedFiles, "ReShade64_dlss5.dll")
+			actions = append(actions, "Installé: ReShade en tant que ReShade64_dlss5.dll")
+		}
+
+		// 1c. Déployer le proxy C++ en dxgi.dll
+		destProxy := filepath.Join(gameDir, "dxgi.dll")
+		if dryRun {
+			actions = append(actions, "Copier Dual-Proxy C++ -> dxgi.dll")
+		} else {
+			if err := copyFile(plan.DualProxyPath, destProxy); err != nil {
+				return nil, fmt.Errorf("erreur déploiement proxy C++ (dxgi.dll): %w", err)
+			}
+			installedFiles = append(installedFiles, "dxgi.dll")
+			actions = append(actions, "Installé: Dual-Proxy C++ en tant que dxgi.dll")
+		}
+	} else {
+		// Architecture A : Déploiement standard ReShade
+		destProxy := filepath.Join(gameDir, info.ProxyTarget)
+		if dryRun {
+			actions = append(actions, fmt.Sprintf("Copier ReShade -> %s", destProxy))
+		} else {
+			if err := copyFile(plan.ReShadeDllPath, destProxy); err != nil {
+				return nil, fmt.Errorf("erreur déploiement ReShade (%s): %w", info.ProxyTarget, err)
+			}
+			installedFiles = append(installedFiles, info.ProxyTarget)
+			actions = append(actions, fmt.Sprintf("Installé: ReShade en tant que %s", info.ProxyTarget))
+		}
 	}
 
 	// 2. Déploiement Add-on DLSS 5 (renodx-dlss5.addon64)
@@ -100,27 +144,118 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 	return actions, nil
 }
 
-// ensureLukeRossCompatibility neutralise l'export 'ReShadeVersion' dans le dxgi.dll de LukeRoss
-// et désactive le hook openvr_api.dll dans le proxy ReShade pour éviter un conflit avec le runtime VR.
+// ensureLukeRossCompatibility applique l'ensemble des correctifs chirurgicaux REX :
+// 1. Neutralise l'export 'ReShadeVersion' -> 'ReShxdeVersion' dans RealVR64.dll (anti-collision)
+// 2. Débride la Feature 18 (DLSS 5) dans RealVR64.dll à 0x25EE03 (6x NOP au lieu de rejeter avec BAD0000B)
+// 3. Neutralise les hooks dxgi.dll et openvr_api.dll dans ReShade (anti-écran noir / conflit VR)
+// 4. Débride le pool de travail de renodx-dlss5.addon64 à 0xDFF5 (pool infini) et 0xA13F (évaluation continue)
 func ensureLukeRossCompatibility(gameDir, proxyTarget string) {
-	dxgiPath := filepath.Join(gameDir, "dxgi.dll")
-	data, err := os.ReadFile(dxgiPath)
-	if err == nil {
+	// 1 & 2. Patches sur RealVR64.dll (ou dxgi.dll de LukeRoss avant renommage)
+	realVRNames := []string{"RealVR64.dll", "dxgi.dll"}
+	for _, name := range realVRNames {
+		lrPath := filepath.Join(gameDir, name)
+		data, err := os.ReadFile(lrPath)
+		if err != nil {
+			continue
+		}
+		modified := false
+
+		// Anti-double injection: ReShadeVersion -> ReShxdeVersion
 		needle := []byte("ReShadeVersion\x00")
 		if idx := strings.Index(string(data), string(needle)); idx != -1 {
 			copy(data[idx:], []byte("ReShxdeVersion\x00"))
-			_ = os.WriteFile(dxgiPath, data, 0644)
+			modified = true
+		}
+
+		// Feature 18 bypass dans RealVR64.dll à l'offset 0x25EE03 (6x NOP: 0f 85 f1 07 00 00 -> 90 90 90 90 90 90)
+		lrOffset := 0x25EE03
+		if len(data) > lrOffset+6 {
+			expected := []byte{0x0f, 0x85, 0xf1, 0x07, 0x00, 0x00}
+			if bytes.Equal(data[lrOffset:lrOffset+6], expected) {
+				copy(data[lrOffset:lrOffset+6], []byte{0x90, 0x90, 0x90, 0x90, 0x90, 0x90})
+				modified = true
+			}
+		}
+
+		if modified {
+			_ = os.WriteFile(lrPath, data, 0644)
 		}
 	}
 
-	// Neutraliser le hook openvr_api.dll dans le proxy ReShade
-	proxyPath := filepath.Join(gameDir, proxyTarget)
-	if pData, err := os.ReadFile(proxyPath); err == nil {
+	// 3. Neutraliser les hooks dxgi.dll et openvr_api.dll dans ReShade (anti-écran noir / conflit VR)
+	reshadeTargets := []string{proxyTarget, "ReShade64_dlss5.dll"}
+	for _, target := range reshadeTargets {
+		if target == "" {
+			continue
+		}
+		pPath := filepath.Join(gameDir, target)
+		pData, err := os.ReadFile(pPath)
+		if err != nil {
+			continue
+		}
+		pModified := false
+
 		openvrWide := []byte("o\x00p\x00e\x00n\x00v\x00r\x00_\x00a\x00p\x00i\x00.\x00d\x00l\x00l\x00")
 		openvxWide := []byte("o\x00p\x00e\x00n\x00v\x00x\x00_\x00a\x00p\x00i\x00.\x00d\x00l\x00l\x00")
 		if oIdx := strings.Index(string(pData), string(openvrWide)); oIdx != -1 {
 			copy(pData[oIdx:], openvxWide)
-			_ = os.WriteFile(proxyPath, pData, 0644)
+			pModified = true
+		}
+
+		dxgiWide := []byte("d\x00x\x00g\x00i\x00.\x00d\x00l\x00l\x00")
+		dxgxWide := []byte("d\x00x\x00g\x00x\x00.\x00d\x00l\x00l\x00")
+		if dIdx := strings.Index(string(pData), string(dxgiWide)); dIdx != -1 {
+			copy(pData[dIdx:], dxgxWide)
+			pModified = true
+		}
+
+		if pModified {
+			_ = os.WriteFile(pPath, pData, 0644)
+		}
+	}
+
+	// 4. Débrider renodx-dlss5.addon64 (Pool infini + débridage évaluation continue)
+	addonPath := filepath.Join(gameDir, "renodx-dlss5.addon64")
+	if aData, err := os.ReadFile(addonPath); err == nil {
+		aModified := false
+
+		// Offset 0xDFF5 : c6 42 60 01 -> c6 42 60 00 (pool infini)
+		poolOff := 0xDFF5
+		if len(aData) > poolOff+4 && bytes.Equal(aData[poolOff:poolOff+4], []byte{0xc6, 0x42, 0x60, 0x01}) {
+			aData[poolOff+3] = 0x00
+			aModified = true
+		}
+
+		// Offset 0xA13F : 74 59 -> 90 90 (débridage évaluation continue)
+		evalOff := 0xA13F
+		if len(aData) > evalOff+2 && bytes.Equal(aData[evalOff:evalOff+2], []byte{0x74, 0x59}) {
+			copy(aData[evalOff:evalOff+2], []byte{0x90, 0x90})
+			aModified = true
+		}
+
+		// Offset 0xE0DF : 0f 84 bd 00 00 00 -> 90 90 90 90 90 90 (fence wait bypass)
+		fenceOff := 0xE0DF
+		if len(aData) > fenceOff+6 && bytes.Equal(aData[fenceOff:fenceOff+6], []byte{0x0f, 0x84, 0xbd, 0x00, 0x00, 0x00}) {
+			copy(aData[fenceOff:fenceOff+6], []byte{0x90, 0x90, 0x90, 0x90, 0x90, 0x90})
+			aModified = true
+		}
+
+		// Offset 0xDF91 : 0f 84 82 01 00 00 -> 90 90 90 90 90 90 (exhaustion discard bypass)
+		exhOff := 0xDF91
+		if len(aData) > exhOff+6 && bytes.Equal(aData[exhOff:exhOff+6], []byte{0x0f, 0x84, 0x82, 0x01, 0x00, 0x00}) {
+			copy(aData[exhOff:exhOff+6], []byte{0x90, 0x90, 0x90, 0x90, 0x90, 0x90})
+			aModified = true
+		}
+
+		// Offset 0xA222 : 0f 85 78 01 00 00 -> 90 90 90 90 90 90 (log throttle bypass)
+		logOff := 0xA222
+		if len(aData) > logOff+6 && bytes.Equal(aData[logOff:logOff+6], []byte{0x0f, 0x85, 0x78, 0x01, 0x00, 0x00}) {
+			copy(aData[logOff:logOff+6], []byte{0x90, 0x90, 0x90, 0x90, 0x90, 0x90})
+			aModified = true
+		}
+
+		if aModified {
+			_ = os.WriteFile(addonPath, aData, 0644)
 		}
 	}
 }

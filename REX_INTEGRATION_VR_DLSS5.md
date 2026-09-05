@@ -111,33 +111,50 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
 
 ---
 
-## 4. Architecture de la Solution Finale (Dual-Proxy C++)
+## 4. Architecture de la Solution Finale (Dual-Proxy C++ & Outil Go)
 
 ### 4.1 Roles et Responsabilites
-- **afop.exe** charge dxgi.dll (notre proxy compile MSVC).
+- **afop.exe** charge dxgi.dll (notre proxy compile MSVC ou deploye par vr-dlss5-patch).
 - **Notre proxy dxgi.dll** :
   - Transmet immediatement et a 100% les 20 fonctions DXGI (CreateDXGIFactory, etc.) a RealVR64.dll.
   - Charge en parallele ReShade64_dlss5.dll via LoadLibraryA.
-- **RealVR64.dll** (patche ReShxdeVersion) :
+- **RealVR64.dll** (patche ReShxdeVersion + Feature 18 unblock @ 0x25EE03) :
   - Pilote D3D12, la SwapChain, OpenXR et la stereoscopie vers le casque VR.
 - **ReShade64_dlss5.dll** (patche dxgx / openvx) :
   - Heberge l'add-on renodx-dlss5.addon64 sans toucher a la SwapChain ni a OpenVR.
+- **renodx-dlss5.addon64** (patche 0xDFF5 pool infini + 0xA13F eval continue) :
   - RenoDX hooke _nvngx.dll et applique les poids neuronaux de nvngx_dlssnr.dll.
+
+### 4.2 Alignement de l'Outil Automatique Go (`vr-dlss5-patch`)
+L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes chirurgicales du REX :
+1. Déploiement automatique du dual-proxy C++ (`proxy/dxgi.dll`) et renommage de LukeRoss en `RealVR64.dll` en cas de présence VR (Architecture B).
+2. Application in-place de tous les patches binaires PE via `installer.go:ensureLukeRossCompatibility()` :
+   - `ReShadeVersion` -> `ReShxdeVersion` dans RealVR64.dll
+   - Whitelist Feature 18 à l'offset `0x25EE03` dans RealVR64.dll (6x NOP)
+   - Neutralisation des hooks `dxgi.dll` -> `dxgx.dll` et `openvr_api.dll` -> `openvx_api.dll` dans ReShade64_dlss5.dll
+   - Débridage du pool de travail à `0xDFF5` (`c6 42 60 00`) dans renodx-dlss5.addon64
+   - Débridage de l'évaluation continue à `0xA13F` (`90 90`) dans renodx-dlss5.addon64
+   - Bypass des erreurs de fence et de pool aux offsets `0xE0DF`, `0xDF91`, `0xA222`.
 
 ---
 
 ## 5. Recette Reproductible pour un Nouveau Jeu
 
-1. **Preparer les fichiers dans le dossier du jeu** :
+1. **Via l'outil automatique Go** :
+   ```powershell
+   cd C:\code\vrdlss5\vr-dlss5-patch
+   .\vr-dlss5-patch.exe -game "D:\Games\NomDuJeu"
+   ```
+2. **Ou manuellement** :
    - Renommer le dxgi.dll de LukeRoss en RealVR64.dll.
-   - Patcher RealVR64.dll : remplacer le texte ASCII ReShadeVersion par ReShxdeVersion.
+   - Patcher RealVR64.dll : remplacer le texte ASCII ReShadeVersion par ReShxdeVersion, et patcher l'offset `0x25EE03` (6x NOP).
    - Copier ReShade64.dll (v6.8 avec support Add-on) sous le nom ReShade64_dlss5.dll.
-   - Patcher ReShade64_dlss5.dll : remplacer dxgi.dll par dxgx.dll et openvr_api.dll par openvx_api.dll (en conservant rigoureusement la taille exacte du fichier).
-   - Deposer renodx-dlss5.addon64 et nvngx_dlssnr.dll.
-   - Compiler et copier notre proxy proxy/dxgi.dll.
-2. **Configurer les INI** :
-   - Dans RealVR.ini : PreferredAPI2=2, verifier KeyOverlay (112 pour F1).
-   - Dans ReShade.ini : KeyOverlay=36 (Home).
-3. **Lancer le jeu** :
+   - Patcher ReShade64_dlss5.dll : remplacer dxgi.dll par dxgx.dll et openvr_api.dll par openvx_api.dll (taille exacte preservee).
+   - Deposer renodx-dlss5.addon64 (patche 0xDFF5 et 0xA13F) et nvngx_dlssnr.dll.
+   - Copier notre proxy proxy/dxgi.dll.
+3. **Configurer les INI** :
+   - Dans RealVR.ini : PreferredAPI2=2, KeyOverlay=112 (F1).
+   - Dans ReShade.ini : [RenoDX.DLSS5] EnableHooks=1.
+4. **Lancer le jeu** :
    - Verifier vr_dlss5_proxy.log : RealVR64 et ReShade64_dlss5 charges.
    - Verifier ReShade.log : renodx-dlss5 charge et nvngx_dlssnr.dll monte en memoire.

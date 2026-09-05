@@ -145,13 +145,29 @@ func main() {
 		fmt.Printf("  ✓ dlss5-bridge.addon64 prêt\n")
 	}
 
-	// 4. Installation dans le jeu
-	fmt.Printf("\n[3/3] Application du patch dans le jeu :\n")
+	// Vérifier si le dual-proxy C++ (Architecture B) est présent dans proxy/dxgi.dll
+	var dualProxyPath string
+	execPath, _ := os.Executable()
+	execDir := filepath.Dir(execPath)
+	candidates := []string{
+		filepath.Join("proxy", "dxgi.dll"),
+		filepath.Join(execDir, "proxy", "dxgi.dll"),
+		filepath.Join(execDir, "dxgi.dll"),
+		`C:\code\vrdlss5\proxy\dxgi.dll`,
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && fi.Size() > 10*1024 {
+			dualProxyPath = c
+			break
+		}
+	}
+
 	plan := &installer.InstallPlan{
 		ReShadeDllPath: reshadeDll,
 		AddonPath:      addonPath,
 		ModelPath:      modelPath,
 		BridgePath:     bridgePath,
+		DualProxyPath:  dualProxyPath,
 	}
 
 	actions, err := installer.Install(info, plan, dryRun)
