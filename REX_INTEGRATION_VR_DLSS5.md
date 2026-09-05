@@ -84,7 +84,9 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
     Patch applique : `90 90 90 90 90 90` (6x NOP).
   - **A `0xa222`** : instruction `0f 85 78 01 00 00` (`jne +0x178` masquant les logs de frames > 1).
     Patch applique : `90 90 90 90 90 90` (6x NOP) pour afficher le decompte de frames evaluees en continu.
-- **Resultat** : L'erreur d'epuisement de pool a ete definitivement eradiquee.
+  - **A `0xdf79`** : instruction `48 83 f9 04 72 1f` (`cmp rcx, 4` suivi de `jb +0x1f`).
+    Patch applique : `48 83 e1 03 eb 1f` (`and rcx, 3` suivi de `jmp +0x1f`), transformant l'allocation finie en un **ring buffer cyclique infini modulo 4** (`rcx = rcx % 4`) sans jamais attendre de fence D3D12.
+- **Resultat** : L'erreur d'epuisement de pool a ete definitivement eradiquee et la rotation des buffers tourne a l'infini.
 
 ### 3.8 Le Blocage Fondamental de la Feature 18 par LukeRoss
 - **Decouverte dans `RealVR64.log`** :
