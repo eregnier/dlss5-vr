@@ -87,6 +87,9 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
   - **A `0xA13F` (Debridage de l'Evaluation Continue)** :
     `83 f8 08 74 59` (`cmp eax, 8; je 0xA191`) -> `74 59` remplace par `90 90` (2x NOP).
     Neutralise le saut qui ignorait l'evaluation neuronale sur les passes subsequentes.
+  - **A `0x87D1` (Suivi Dynamique des Handles DLSS Stéréoscopiques)** :
+    `0f 85 c4 00 00 00` (`jne +0xC4`) -> `90 90 90 90 90 90` (6x NOP).
+    Permet à RenoDX de basculer instantanément sur tout nouveau handle DLSS créé lors du passage en 3D continue dans LukeRoss.
   - **A `0xe0df`** : instruction `0f 84 bd 00 00 00` (`je +0xbd` vers routine d'erreur) -> `90 90 90 90 90 90`.
   - **A `0xdf91`** : instruction `0f 84 82 01 00 00` (`je 0xe117` vers vidage de pool) -> `90 90 90 90 90 90`.
   - **A `0xa222`** : instruction `0f 85 78 01 00 00` (`jne +0x178` masquant les logs de frames > 1) -> `90 90 90 90 90 90` pour tracer en direct l'increment continu `count=N`.
