@@ -7,6 +7,17 @@ typedef HRESULT (WINAPI *PFN_CreateDXGIFactory2)(UINT Flags, REFIID riid, void *
 typedef HRESULT (WINAPI *PFN_DXGIDeclareAdapterRemovalSupport)();
 typedef HRESULT (WINAPI *PFN_DXGIGetDebugInterface1)(UINT Flags, REFIID riid, void **pDebug);
 
+// NGX Prototypes
+typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_CreateFeature)(void* pCmdList, int FeatureId, void* pParameters, void** ppHandle);
+typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_EvaluateFeature)(void* pCmdList, void* pHandle, void* pParameters, void* pCallback);
+typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_ReleaseFeature)(void* pHandle);
+
+static PFN_NVSDK_NGX_D3D12_CreateFeature g_pfnNGXCreateFeature = NULL;
+static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnNGXEvaluateFeature = NULL;
+static PFN_NVSDK_NGX_D3D12_ReleaseFeature g_pfnNGXReleaseFeature = NULL;
+static unsigned long long g_evalFrameCounter = 0;
+extern "C" int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback);
+
 static HMODULE g_hRealVR = NULL;
 static HMODULE g_hReShade = NULL;
 static HMODULE g_hSysDxgi = NULL;
@@ -45,11 +56,51 @@ static void InitProxy()
         g_pfnCreateDXGIFactory2 = (PFN_CreateDXGIFactory2)GetProcAddress(g_hRealVR, "CreateDXGIFactory2");
         g_pfnDXGIDeclareAdapterRemovalSupport = (PFN_DXGIDeclareAdapterRemovalSupport)GetProcAddress(g_hRealVR, "DXGIDeclareAdapterRemovalSupport");
         g_pfnDXGIGetDebugInterface1 = (PFN_DXGIGetDebugInterface1)GetProcAddress(g_hRealVR, "DXGIGetDebugInterface1");
+
+        // Detour inconditionnel de NVSDK_NGX_D3D12_EvaluateFeature dans RealVR64
+        void* pRealVREval = (void*)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_EvaluateFeature");
+        if (pRealVREval)
+        {
+            LogMsg("[Proxy] Found RealVR64:NVSDK_NGX_D3D12_EvaluateFeature, installing permanent detour...");
+            DWORD oldProtect;
+            if (VirtualProtect(pRealVREval, 14, PAGE_EXECUTE_READWRITE, &oldProtect))
+            {
+                // Sauvegarder les 14 octets originaux pour le trampoline
+                static BYTE s_trampoline[32];
+                memcpy(s_trampoline, pRealVREval, 14);
+                
+                // Saut du trampoline vers pRealVREval + 14
+                s_trampoline[14] = 0xFF;
+                s_trampoline[15] = 0x25;
+                *(DWORD*)(&s_trampoline[16]) = 0;
+                *(ULONG_PTR*)(&s_trampoline[20]) = ((ULONG_PTR)pRealVREval) + 14;
+                DWORD trampProtect;
+                VirtualProtect(s_trampoline, sizeof(s_trampoline), PAGE_EXECUTE_READWRITE, &trampProtect);
+                g_pfnNGXEvaluateFeature = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)(void*)s_trampoline;
+
+                // Installer jmp qword ptr [rip+0] vers Proxy_NVSDK_NGX_D3D12_EvaluateFeature
+                BYTE patch[14];
+                patch[0] = 0xFF;
+                patch[1] = 0x25;
+                *(DWORD*)(&patch[2]) = 0;
+                extern int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void*, void*, void*, void*);
+                *(ULONG_PTR*)(&patch[6]) = (ULONG_PTR)Proxy_NVSDK_NGX_D3D12_EvaluateFeature;
+                memcpy(pRealVREval, patch, 14);
+
+                VirtualProtect(pRealVREval, 14, oldProtect, &oldProtect);
+                LogMsg("[Proxy] SUCCESS: Permanent direct detour installed on RealVR64:EvaluateFeature!");
+            }
+            else
+            {
+                LogMsg("[Proxy] WARNING: VirtualProtect failed on RealVR64:EvaluateFeature");
+            }
+        }
     }
     else
     {
         LogMsg("[Proxy] WARNING: RealVR64.dll not found, falling back to system dxgi.dll");
     }
+
 
     // 2. Charger ReShade 6.8 (DLSS 5 host) ensuite
     g_hReShade = LoadLibraryA("ReShade64_dlss5.dll");
@@ -144,16 +195,6 @@ typedef HRESULT (WINAPI *PFN_PIXEndCapture)();
 typedef HRESULT (WINAPI *PFN_PIXGetCaptureState)();
 typedef HRESULT (WINAPI *PFN_SetAppCompatStringPointer)();
 typedef HRESULT (WINAPI *PFN_UpdateHMDEmulationStatus)();
-
-// NGX Prototypes
-typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_CreateFeature)(void* pCmdList, int FeatureId, void* pParameters, void** ppHandle);
-typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_EvaluateFeature)(void* pCmdList, void* pHandle, void* pParameters, void* pCallback);
-typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_ReleaseFeature)(void* pHandle);
-
-static PFN_NVSDK_NGX_D3D12_CreateFeature g_pfnNGXCreateFeature = NULL;
-static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnNGXEvaluateFeature = NULL;
-static PFN_NVSDK_NGX_D3D12_ReleaseFeature g_pfnNGXReleaseFeature = NULL;
-static unsigned long long g_evalFrameCounter = 0;
 
 static void* ResolveProc(const char *name)
 {

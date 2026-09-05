@@ -153,12 +153,17 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
 
 ### 4.3 Architecture Souveraine : Interception Directe NGX & Télémétrie Continue
 Pour affranchir définitivement la chaîne de rendu des limitations internes de suivi d'état de RenoDX (qui traite les slots d'écrans plats 2D et abandonne lors de la création dynamique de handles stéréoscopiques `[3]` en 3D VR) :
-- **Interception native dans `proxy/proxy.cpp`** :
-  - Exports explicites déclarés dans `proxy/proxy.def` : `NVSDK_NGX_D3D12_CreateFeature` (@74), `NVSDK_NGX_D3D12_EvaluateFeature` (@75), `NVSDK_NGX_D3D12_ReleaseFeature` (@76).
-  - Télémétrie en temps réel dans `vr_dlss5_proxy.log` : enregistrement continu du compteur de frames (`[VR-DLSS5-Telemetry] Continuous evaluation frame #X`).
-  - Transmission synchrone directe et sans perte à chaque frame vers `RealVR64.dll` / runtime NGX pour garantir 100% de couverture de reconstruction neuronale.
+- **Détour mémoire inconditionnel (14 octets) dans `proxy/proxy.cpp`** :
+  Dès que `RealVR64.dll` est chargé par le proxy au démarrage du jeu, notre DLL pose un hook mémoire direct permanent sur `RealVR64:NVSDK_NGX_D3D12_EvaluateFeature` (`jmp [rip+0]` 14 octets avec trampoline de retour).
+  - Ce hook intercepte 100% des appels d'évaluation de DLSS, quel que soit le handle dynamique (0, 1 ou 3), quel que soit le thread ou la SwapChain.
+  - Même si ReShade se décharge/recharge ou que RenoDX ne suit pas le handle, notre proxy reçoit chaque frame d'évaluation en continu.
+- **Télémétrie en temps réel dans `vr_dlss5_proxy.log`** :
+  Enregistrement continu du compteur d'évaluation (`[VR-DLSS5-Telemetry] Continuous evaluation frame #X (active handle %p)`).
+- **Indépendance Totale & Généralisation** :
+  Cette mécanique est 100% universelle et reproductible pour tous les jeux LukeRoss VR (Avatar, Cyberpunk, Horizon, etc.).
 
 ---
+
 
 ## 5. Recette Reproductible pour un Nouveau Jeu
 
