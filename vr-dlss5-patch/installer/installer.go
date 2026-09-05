@@ -118,6 +118,18 @@ func ensureLukeRossCompatibility(gameDir string) {
 		copy(data[idx:], []byte("ReShxdeVersion\x00"))
 		_ = os.WriteFile(dxgiPath, data, 0644)
 	}
+
+	// Neutraliser le hook openvr_api.dll dans ReShade pour éviter un conflit avec le runtime VR de LukeRoss
+	dinputPath := filepath.Join(gameDir, "dinput8.dll")
+	if dData, err := os.ReadFile(dinputPath); err == nil {
+		// openvr_api.dll en UTF-16LE
+		openvrWide := []byte("o\x00p\x00e\x00n\x00v\x00r\x00_\x00a\x00p\x00i\x00.\x00d\x00l\x00l\x00")
+		openvxWide := []byte("o\x00p\x00e\x00n\x00v\x00x\x00_\x00a\x00p\x00i\x00.\x00d\x00l\x00l\x00")
+		if oIdx := strings.Index(string(dData), string(openvrWide)); oIdx != -1 {
+			copy(dData[oIdx:], openvxWide)
+			_ = os.WriteFile(dinputPath, dData, 0644)
+		}
+	}
 }
 
 // Uninstall supprime les fichiers installés par ce patch d'après le manifest.
