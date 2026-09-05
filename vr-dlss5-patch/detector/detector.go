@@ -173,17 +173,15 @@ func Inspect(exePath string) (*GameInfo, error) {
 		hasD3D12Import := hasImport(info.Imports, "d3d12.dll")
 		hasD3D11Import := hasImport(info.Imports, "d3d11.dll")
 
-		// Cascade intelligente :
-		// Si dinput8 est importé et libre -> dinput8.dll
-		// Sinon si DX12 -> d3d12.dll (tous les jeux DX12 chargent d3d12.dll)
-		// Sinon si DX11 -> d3d11.dll (tous les jeux DX11 chargent d3d11.dll)
-		// Sinon repli sur dinput8.dll
-		if hasDinput8Import && !dinputIsForeignMod {
-			info.ProxyTarget = "dinput8.dll"
-		} else if info.DetectedAPI == "DX12" || hasD3D12Import {
+		// Priorité absolue aux hooks graphiques natifs (d3d12.dll / d3d11.dll) :
+		// ReShade y intercepte directement le pipeline de rendu sans toucher aux périphériques
+		// d'entrée (DirectInput / XInput / DualSense) qui sont sous le contrôle exclusif du mod VR.
+		if info.DetectedAPI == "DX12" || hasD3D12Import {
 			info.ProxyTarget = "d3d12.dll"
 		} else if info.DetectedAPI == "DX11" || hasD3D11Import {
 			info.ProxyTarget = "d3d11.dll"
+		} else if hasDinput8Import && !dinputIsForeignMod {
+			info.ProxyTarget = "dinput8.dll"
 		} else if !dinputIsForeignMod {
 			info.ProxyTarget = "dinput8.dll"
 		} else {

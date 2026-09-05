@@ -80,7 +80,7 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 	if dryRun {
 		actions = append(actions, "Configurer ReShade.ini ([RenoDX.DLSS5] NeuralUplift=1, débloquer add-ons)")
 	} else {
-		if err := updateReShadeIni(gameDir); err != nil {
+		if err := updateReShadeIni(gameDir, info.ProxyTarget); err != nil {
 			return nil, fmt.Errorf("erreur mise à jour ReShade.ini: %w", err)
 		}
 		actions = append(actions, "Configuré: ReShade.ini")
@@ -88,7 +88,7 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 
 	// 6. Neutraliser la détection de conflit entre ReShade 6.8 et le ReShade interne de LukeRoss
 	if !dryRun {
-		ensureLukeRossCompatibility(gameDir)
+		ensureLukeRossCompatibility(gameDir, info.ProxyTarget)
 	}
 
 	// 7. Écriture du manifest pour désinstallation propre
@@ -100,34 +100,27 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 	return actions, nil
 }
 
-// ensureLukeRossCompatibility neutralise l'export 'ReShadeVersion' dans le dxgi.dll de LukeRoss.
-// ReShade 6.x effectue un GetProcAddress(module, "ReShadeVersion") dur dans DllMain
-// pour refuser de s'exécuter si une autre instance existe. En renommant cet export d'1 lettre,
-// ReShade 6.x s'initialise parfaitement aux côtés du mod LukeRoss sans aucun conflit.
-func ensureLukeRossCompatibility(gameDir string) {
+// ensureLukeRossCompatibility neutralise l'export 'ReShadeVersion' dans le dxgi.dll de LukeRoss
+// et désactive le hook openvr_api.dll dans le proxy ReShade pour éviter un conflit avec le runtime VR.
+func ensureLukeRossCompatibility(gameDir, proxyTarget string) {
 	dxgiPath := filepath.Join(gameDir, "dxgi.dll")
 	data, err := os.ReadFile(dxgiPath)
-	if err != nil {
-		return
+	if err == nil {
+		needle := []byte("ReShadeVersion\x00")
+		if idx := strings.Index(string(data), string(needle)); idx != -1 {
+			copy(data[idx:], []byte("ReShxdeVersion\x00"))
+			_ = os.WriteFile(dxgiPath, data, 0644)
+		}
 	}
 
-	needle := []byte("ReShadeVersion\x00")
-	idx := strings.Index(string(data), string(needle))
-	if idx != -1 {
-		// Remplacer "ReShadeVersion" par "ReShxdeVersion"
-		copy(data[idx:], []byte("ReShxdeVersion\x00"))
-		_ = os.WriteFile(dxgiPath, data, 0644)
-	}
-
-	// Neutraliser le hook openvr_api.dll dans ReShade pour éviter un conflit avec le runtime VR de LukeRoss
-	dinputPath := filepath.Join(gameDir, "dinput8.dll")
-	if dData, err := os.ReadFile(dinputPath); err == nil {
-		// openvr_api.dll en UTF-16LE
+	// Neutraliser le hook openvr_api.dll dans le proxy ReShade
+	proxyPath := filepath.Join(gameDir, proxyTarget)
+	if pData, err := os.ReadFile(proxyPath); err == nil {
 		openvrWide := []byte("o\x00p\x00e\x00n\x00v\x00r\x00_\x00a\x00p\x00i\x00.\x00d\x00l\x00l\x00")
 		openvxWide := []byte("o\x00p\x00e\x00n\x00v\x00x\x00_\x00a\x00p\x00i\x00.\x00d\x00l\x00l\x00")
-		if oIdx := strings.Index(string(dData), string(openvrWide)); oIdx != -1 {
-			copy(dData[oIdx:], openvxWide)
-			_ = os.WriteFile(dinputPath, dData, 0644)
+		if oIdx := strings.Index(string(pData), string(openvrWide)); oIdx != -1 {
+			copy(pData[oIdx:], openvxWide)
+			_ = os.WriteFile(proxyPath, pData, 0644)
 		}
 	}
 }
@@ -159,14 +152,16 @@ func Uninstall(gameDir string) ([]string, error) {
 }
 
 // updateReShadeIni configure ReShade.ini pour le DLSS 5 et s'assure qu'aucun add-on n'est désactivé.
-func updateReShadeIni(gameDir string) error {
+func updateReShadeIni(gameDir, proxyTarget string) error {
 	iniPath := filepath.Join(gameDir, "ReShade.ini")
 	sections := parseIni(iniPath)
 
-	// Section PROXY (pour déléguer DirectInput au système Windows si ReShade est chargé en dinput8.dll)
-	proxy := getOrCreateSection(sections, "PROXY")
-	setKey(proxy, "EnableProxyLibrary", "1")
-	setKey(proxy, "ProxyLibrary", `C:\WINDOWS\system32\dinput8.dll`)
+	// Section PROXY (pour déléguer au système Windows le module de proxy utilisé)
+	if proxyTarget != "" && !strings.EqualFold(proxyTarget, "dxgi.dll") {
+		proxy := getOrCreateSection(sections, "PROXY")
+		setKey(proxy, "EnableProxyLibrary", "1")
+		setKey(proxy, "ProxyLibrary", filepath.Join(`C:\WINDOWS\system32`, proxyTarget))
+	}
 
 	// Section GENERAL
 	general := getOrCreateSection(sections, "GENERAL")
