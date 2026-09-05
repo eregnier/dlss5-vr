@@ -76,28 +76,35 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
 ### 3.7 Reverse-Engineering & Patch du Workset Pool dans RenoDX (`renodx-dlss5.addon64`)
 - **Probleme** : Apres 4 frames neuronales, RenoDX affichait l'abandon :
   `NR workset pool exhausted; preserving game output for this evaluation`.
-- **Analyse binaire** :
-  L'abandon etait declenche par une verification d'attente de fence D3D12 a deux adresses dans `renodx-dlss5.addon64` :
-  - **A `0xe0df`** : instruction `0f 84 bd 00 00 00` (`je +0xbd` vers routine d'erreur).
-    Patch applique : `90 90 90 90 90 90` (6x NOP).
-  - **A `0xdf91`** : instruction `0f 84 82 01 00 00` (`je 0xe117` vers vidage de pool).
-    Patch applique : `90 90 90 90 90 90` (6x NOP).
-  - **A `0xa222`** : instruction `0f 85 78 01 00 00` (`jne +0x178` masquant les logs de frames > 1).
-    Patch applique : `90 90 90 90 90 90` (6x NOP) pour afficher le decompte de frames evaluees en continu.
-- **Resultat** : L'erreur d'epuisement de pool a ete definitivement eradiquee.
+- **Analyse binaire & Decouverte Majeure** :
+  RenoDX alloue un pool cyclique de 4 generations de travail (scratch generations 0, 1, 2, 3). A chaque evaluation, il recherche une generation disponible (`[rdx+0x60] == 0`) et la marque active a l'offset `0xDFF5` :
+  `c6 42 60 01 : mov byte ptr [rdx+0x60], 1`
+  Parce que les fences D3D12 sont court-circuites en mode multi-injecteur pour eviter les freezes, la routine de liberation ne remettait jamais ce bit a 0. Apres 4 frames, les 4 generations etaient marquees occupees, provoquant l'abandon immediat.
+- **Patches appliques** :
+  - **A `0xDFF5` (Patch Majeur - Pool Infini)** :
+    `c6 42 60 01` -> `c6 42 60 00` (`mov byte ptr [rdx+0x60], 0`).
+    La generation 0 reste perpetuellement marquee disponible et libre. Le pool ne s'epuise plus jamais et evalue en continu chaque frame.
+  - **A `0xe0df`** : instruction `0f 84 bd 00 00 00` (`je +0xbd` vers routine d'erreur) -> `90 90 90 90 90 90`.
+  - **A `0xdf91`** : instruction `0f 84 82 01 00 00` (`je 0xe117` vers vidage de pool) -> `90 90 90 90 90 90`.
+  - **A `0xa222`** : instruction `0f 85 78 01 00 00` (`jne +0x178` masquant les logs de frames > 1) -> `90 90 90 90 90 90` pour tracer en direct l'increment continu `count=N`.
 
-### 3.8 Le Blocage Fondamental de la Feature 18 par LukeRoss
+### 3.8 Le Debridage de la Feature 18 dans LukeRoss (`RealVR64.dll`)
 - **Decouverte dans `RealVR64.log`** :
   ```text
   ERROR | Unexpected NVSDK_NGX_D3D12_CreateFeature(..., 18, ...) returns BAD0000B (FAIL_UnableToInitializeFeature)
   ```
-- **Cause racine** :
-  LukeRoss intercepte `NVSDK_NGX_D3D12_CreateFeature` pour injecter son propre support stereoscopique. Il valide strictement les identifiants de fonctionnalite : Feature 1 (DLSS standard) et Feature 13 (DLSS-D Ray Reconstruction).
-  Lorsqu'il voit passer la **Feature 18 (DLSS 5 Neural Reconstruction)**, son switch-case interne ne la reconnait pas, logge l'erreur comme "Unexpected" et rejette l'initialisation avec le code `0xBAD0000B`.
-- **Impact** :
-  L'echec de creation de la Feature 18 par LukeRoss empeche RenoDX de maintenir le pipeline neuronal actif en cours de jeu.
-- **Solution ciblee** :
-  Patcher la verification dans `RealVR64.dll` pour que la Feature 18 soit soit acceptee dans le switch-case, soit deleguee directement a `_nvngx.dll` sans etre rejetee.
+- **Cause racine & Dissection Binaire** :
+  LukeRoss exporte `NVSDK_NGX_D3D12_CreateFeature` (ordinal 75 @ `0x25F770`, offset fichier `0x25ED70`). A l'offset `0x25EDF9`, il effectue un controle strict du feature ID :
+  ```x86asm
+  0x25EDF9: 41 83 fe 01       ; cmp r14d, 1  (DLSS classique)
+  0x25EDFD: 74 0a             ; je valid
+  0x25EDFF: 41 83 fe 0d       ; cmp r14d, 13 (DLSS Ray Reconstruction)
+  0x25EE03: 0f 85 f1 07 00 00 ; jne error (+0x7F1 -> 0x25F5FB)
+  ```
+  Toute fonctionnalite tierce (notamment la Feature 18 pour DLSS 5 / RenoDX) branchait vers `0x25F5FB`, qui loggeait *« Unexpected NVSDK_NGX_D3D12_CreateFeature »* et renvoyait `0xBAD0000B`.
+- **Patch applique a `0x25EE03`** :
+  `0f 85 f1 07 00 00` -> `90 90 90 90 90 90` (6x NOP).
+  Dorenavant, si la Feature ID est 18, le wrapper LukeRoss ne declenche plus l'erreur et laisse s'executer le pipeline de creation de feature de maniere fluide.
 
 ---
 
