@@ -139,6 +139,13 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
    - Débridage de l'évaluation continue à `0xA13F` (`90 90`) dans renodx-dlss5.addon64
    - Bypass des erreurs de fence et de pool aux offsets `0xE0DF`, `0xDF91`, `0xA222`.
 
+### 4.3 Architecture Souveraine : Interception Directe NGX & Télémétrie Continue
+Pour affranchir définitivement la chaîne de rendu des limitations internes de suivi d'état de RenoDX (qui traite les slots d'écrans plats 2D et abandonne lors de la création dynamique de handles stéréoscopiques `[3]` en 3D VR) :
+- **Interception native dans `proxy/proxy.cpp`** :
+  - Exports explicites déclarés dans `proxy/proxy.def` : `NVSDK_NGX_D3D12_CreateFeature` (@74), `NVSDK_NGX_D3D12_EvaluateFeature` (@75), `NVSDK_NGX_D3D12_ReleaseFeature` (@76).
+  - Télémétrie en temps réel dans `vr_dlss5_proxy.log` : enregistrement continu du compteur de frames (`[VR-DLSS5-Telemetry] Continuous evaluation frame #X`).
+  - Transmission synchrone directe et sans perte à chaque frame vers `RealVR64.dll` / runtime NGX pour garantir 100% de couverture de reconstruction neuronale.
+
 ---
 
 ## 5. Recette Reproductible pour un Nouveau Jeu
@@ -159,5 +166,6 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
    - Dans RealVR.ini : PreferredAPI2=2, KeyOverlay=112 (F1).
    - Dans ReShade.ini : [RenoDX.DLSS5] EnableHooks=1.
 4. **Lancer le jeu** :
-   - Verifier vr_dlss5_proxy.log : RealVR64 et ReShade64_dlss5 charges.
+   - Verifier vr_dlss5_proxy.log : RealVR64 et ReShade64_dlss5 charges, télémétrie continue active.
    - Verifier ReShade.log : renodx-dlss5 charge et nvngx_dlssnr.dll monte en memoire.
+

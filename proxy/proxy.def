@@ -20,3 +20,6 @@ EXPORTS
     DXGIDisableVBlankVirtualization = Proxy_DXGIDisableVBlankVirtualization @18
     DXGIGetDebugInterface1 = Proxy_DXGIGetDebugInterface1 @19
     DXGIReportAdapterConfiguration = Proxy_DXGIReportAdapterConfiguration @20
+    NVSDK_NGX_D3D12_CreateFeature = Proxy_NVSDK_NGX_D3D12_CreateFeature @74
+    NVSDK_NGX_D3D12_EvaluateFeature = Proxy_NVSDK_NGX_D3D12_EvaluateFeature @75
+    NVSDK_NGX_D3D12_ReleaseFeature = Proxy_NVSDK_NGX_D3D12_ReleaseFeature @76

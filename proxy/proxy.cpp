@@ -129,6 +129,32 @@ HRESULT WINAPI Proxy_DXGIGetDebugInterface1(UINT Flags, REFIID riid, void **pDeb
     return E_FAIL;
 }
 
+typedef HRESULT (WINAPI *PFN_ApplyCompatResolutionQuirking)();
+typedef HRESULT (WINAPI *PFN_CompatString)();
+typedef HRESULT (WINAPI *PFN_CompatValue)();
+typedef HRESULT (WINAPI *PFN_DXGID3D10CreateDevice)();
+typedef HRESULT (WINAPI *PFN_DXGID3D10CreateLayeredDevice)();
+typedef HRESULT (WINAPI *PFN_DXGID3D10GetLayeredDeviceSize)();
+typedef HRESULT (WINAPI *PFN_DXGID3D10RegisterLayers)();
+typedef HRESULT (WINAPI *PFN_DXGIDisableVBlankVirtualization)();
+typedef HRESULT (WINAPI *PFN_DXGIDumpJournal)();
+typedef HRESULT (WINAPI *PFN_DXGIReportAdapterConfiguration)();
+typedef HRESULT (WINAPI *PFN_PIXBeginCapture)();
+typedef HRESULT (WINAPI *PFN_PIXEndCapture)();
+typedef HRESULT (WINAPI *PFN_PIXGetCaptureState)();
+typedef HRESULT (WINAPI *PFN_SetAppCompatStringPointer)();
+typedef HRESULT (WINAPI *PFN_UpdateHMDEmulationStatus)();
+
+// NGX Prototypes
+typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_CreateFeature)(void* pCmdList, int FeatureId, void* pParameters, void** ppHandle);
+typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_EvaluateFeature)(void* pCmdList, void* pHandle, void* pParameters, void* pCallback);
+typedef int (WINAPI *PFN_NVSDK_NGX_D3D12_ReleaseFeature)(void* pHandle);
+
+static PFN_NVSDK_NGX_D3D12_CreateFeature g_pfnNGXCreateFeature = NULL;
+static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnNGXEvaluateFeature = NULL;
+static PFN_NVSDK_NGX_D3D12_ReleaseFeature g_pfnNGXReleaseFeature = NULL;
+static unsigned long long g_evalFrameCounter = 0;
+
 static void* ResolveProc(const char *name)
 {
     void *p = NULL;
@@ -137,15 +163,7 @@ static void* ResolveProc(const char *name)
     return p;
 }
 
-#define FORWARD_VOID(name) \
-    typedef void (WINAPI *PFN_##name)(); \
-    static PFN_##name s_pfn_##name = NULL; \
-    if (!s_pfn_##name) s_pfn_##name = (PFN_##name)ResolveProc(#name); \
-    if (s_pfn_##name) { s_pfn_##name(); return S_OK; } \
-    return S_OK;
-
 #define FORWARD_HR(name) \
-    typedef HRESULT (WINAPI *PFN_##name)(); \
     static PFN_##name s_pfn_##name = NULL; \
     if (!s_pfn_##name) s_pfn_##name = (PFN_##name)ResolveProc(#name); \
     if (s_pfn_##name) return s_pfn_##name(); \
@@ -167,4 +185,54 @@ HRESULT WINAPI Proxy_PIXGetCaptureState() { InitProxy(); FORWARD_HR(PIXGetCaptur
 HRESULT WINAPI Proxy_SetAppCompatStringPointer() { InitProxy(); FORWARD_HR(SetAppCompatStringPointer); }
 HRESULT WINAPI Proxy_UpdateHMDEmulationStatus() { InitProxy(); FORWARD_HR(UpdateHMDEmulationStatus); }
 
+int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, void* pParameters, void** ppHandle)
+{
+    InitProxy();
+    if (!g_pfnNGXCreateFeature && g_hRealVR)
+        g_pfnNGXCreateFeature = (PFN_NVSDK_NGX_D3D12_CreateFeature)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_CreateFeature");
+    
+    char buf[128];
+    sprintf_s(buf, sizeof(buf), "[VR-DLSS5] CreateFeature called: FeatureId=%d", FeatureId);
+    LogMsg(buf);
+
+    if (g_pfnNGXCreateFeature)
+        return g_pfnNGXCreateFeature(pCmdList, FeatureId, pParameters, ppHandle);
+    return 1;
 }
+
+int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
+{
+    InitProxy();
+    if (!g_pfnNGXEvaluateFeature && g_hRealVR)
+        g_pfnNGXEvaluateFeature = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_EvaluateFeature");
+
+    g_evalFrameCounter++;
+    if ((g_evalFrameCounter % 100) == 1 || g_evalFrameCounter <= 10)
+    {
+        char buf[128];
+        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Continuous evaluation frame #%llu (active handle %p)", g_evalFrameCounter, pHandle);
+        LogMsg(buf);
+    }
+
+    if (g_pfnNGXEvaluateFeature)
+        return g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
+    return 1;
+}
+
+int WINAPI Proxy_NVSDK_NGX_D3D12_ReleaseFeature(void* pHandle)
+{
+    InitProxy();
+    if (!g_pfnNGXReleaseFeature && g_hRealVR)
+        g_pfnNGXReleaseFeature = (PFN_NVSDK_NGX_D3D12_ReleaseFeature)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_ReleaseFeature");
+
+    char buf[128];
+    sprintf_s(buf, sizeof(buf), "[VR-DLSS5] ReleaseFeature called: handle=%p", pHandle);
+    LogMsg(buf);
+
+    if (g_pfnNGXReleaseFeature)
+        return g_pfnNGXReleaseFeature(pHandle);
+    return 1;
+}
+
+}
+
