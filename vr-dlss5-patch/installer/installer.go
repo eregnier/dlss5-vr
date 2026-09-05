@@ -254,6 +254,13 @@ func ensureLukeRossCompatibility(gameDir, proxyTarget string) {
 			aModified = true
 		}
 
+		// Offset 0x36EA8 : 75 56 -> 90 90 (force évaluation continue sur TOUS les handles dynamiques / ANY_HANDLE)
+		anyHandleOff := 0x36EA8
+		if len(aData) > anyHandleOff+2 && bytes.Equal(aData[anyHandleOff:anyHandleOff+2], []byte{0x75, 0x56}) {
+			copy(aData[anyHandleOff:anyHandleOff+2], []byte{0x90, 0x90})
+			aModified = true
+		}
+
 		if aModified {
 			_ = os.WriteFile(addonPath, aData, 0644)
 		}
