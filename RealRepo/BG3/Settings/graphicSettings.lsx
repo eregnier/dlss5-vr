@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<save>
+    <version major="4" minor="8" revision="0" build="500"/>
+    <region id="Config">
+        <node id="root">
+            <attribute id="Version64" type="int64" value="36169534507319298"/>
+            <children>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="AntiAliasing"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="0"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="CASEnabled"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="0"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="DLSS2Mode"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="4"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="DOF"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="0"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="FakeFullscreenEnabled"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="0"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="GraphicSettingsVersion"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="5"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="RefreshRateDenominator"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="1000"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="RefreshRateNumerator"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="119982"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="ResolutionUpscaleType"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="3"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="ScreenHeight"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="1024"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="ScreenWidth"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="1280"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="ShowGammaCalibration"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="0"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="TripleBuffering"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="0"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="UpscaleSharpness"/>
+                    <attribute id="Type" type="int32" value="2"/>
+                    <attribute id="Value" type="float" value="0.37"/>
+                </node>
+                <node id="ConfigEntry">
+                    <attribute id="MapKey" type="FixedString" value="VSync"/>
+                    <attribute id="Type" type="int32" value="0"/>
+                    <attribute id="Value" type="int32" value="0"/>
+                </node>
+            </children>
+        </node>
+    </region>
+</save>

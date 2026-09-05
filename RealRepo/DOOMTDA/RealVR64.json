@@ -1,0 +1,14 @@
+{
+	"file_format_version": "1.0.0",
+	"layer": {
+		"name": "VK_LAYER_RealVR",
+		"type": "GLOBAL",
+		"library_path": ".\\RealVR64.dll",
+		"api_version": "1.4.313",
+		"implementation_version": "2",
+		"description": "R.E.A.L. VR mod for 64-bit games (by LukeRoss)",
+		"disable_environment": {
+			"DISABLE_VK_LAYER_RealVR_1": "1"
+		}
+	}
+}

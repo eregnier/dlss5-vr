@@ -1,0 +1,31 @@
+# Binaires compilés
+*.exe
+*.exe~
+*.dll.tmp
+
+# Archives
+*.zip
+*.7z
+*.rar
+*.tar.gz
+
+# Logs & temporaires
+*.log
+*.tmp
+*.bak
+
+# Cache local
+cache/
+temp/
+tmp/
+.vr-dlss5-patch.manifest
+
+# Dépôt externe amont cloné
+DLSS5oneclick/
+
+# Fichiers système & IDE
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
