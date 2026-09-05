@@ -241,64 +241,34 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, vo
     return 1;
 }
 
-static HMODULE g_hRenoDX = NULL;
-static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnRenoDX_Evaluate = NULL;
-
-static thread_local bool g_inRenoEvaluation = false;
-
 int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
 {
     InitProxy();
 
-    // 0. Protection anti-récursion essentielle :
-    // Quand RenoDX exécute son évaluation neuronale, il appelle en interne son pointeur
-    // de fonction original (qui pointe vers notre hook proxy). Sans ce verrou, récursion infinie et crash immédiat.
-    if (g_inRenoEvaluation)
-    {
-        if (g_pfnNGXEvaluateFeature)
-            return g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
-        return 0;
-    }
+    g_evalFrameCounter++;
 
-    // 1. Liaison dynamique au moteur neuronal RenoDX DLSS 5 (RVA 0x376C0)
-    if (!g_pfnRenoDX_Evaluate)
-    {
-        if (!g_hRenoDX) g_hRenoDX = GetModuleHandleA("renodx-dlss5.addon64");
-        if (g_hRenoDX)
-        {
-            g_pfnRenoDX_Evaluate = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)((uintptr_t)g_hRenoDX + 0x376C0);
-            LogMsg("[VR-DLSS5] SUCCESS: Bound directly to RenoDX DLSS 5 Neural Reconstruction engine (RVA 0x376C0)!");
-        }
-    }
-
+    // 1. Toujours exécuter l'évaluation DLSS native de LukeRoss (RealVR64)
+    // C'est RealVR64 qui pilote les matrices stéréoscopiques VR pour chaque œil,
+    // maintient la parité des frames et appelle en interne le runtime NGX (_nvngx.dll),
+    // qui est intercepté par renodx-dlss5.addon64 pour injecter Feature 18.
     int result = 0;
-    int renoResult = -1;
-
-    if (g_pfnRenoDX_Evaluate && pCmdList && pParameters)
+    if (g_pfnNGXEvaluateFeature)
     {
-        g_inRenoEvaluation = true;
-        // Dispatch continu vers RenoDX DLSS 5 (Feature 18 avec signed snippet et guides)
-        renoResult = g_pfnRenoDX_Evaluate(pCmdList, pHandle, pParameters, pCallback);
-        g_inRenoEvaluation = false;
-        result = renoResult;
-    }
-    else if (g_pfnNGXEvaluateFeature)
-    {
-        // Repli standard si RenoDX n'est pas encore prêt
         result = g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
     }
 
-    g_evalFrameCounter++;
-    if ((g_evalFrameCounter % 100) == 1 || g_evalFrameCounter <= 10)
+    // 2. Télémétrie de synchronisation continue
+    if ((g_evalFrameCounter % 200) == 1 || g_evalFrameCounter <= 20)
     {
         char buf[256];
-        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Frame #%llu: gameHandle=%p, renoEval=0x%08X (RenoDX Engine=%s)", 
-            g_evalFrameCounter, pHandle, renoResult, g_pfnRenoDX_Evaluate ? "ACTIVE" : "PENDING");
+        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Continuous VR frame #%llu: gameHandle=%p, eval_ret=0x%08X", 
+            g_evalFrameCounter, pHandle, result);
         LogMsg(buf);
     }
 
     return result;
 }
+
 
 
 int WINAPI Proxy_NVSDK_NGX_D3D12_ReleaseFeature(void* pHandle)
