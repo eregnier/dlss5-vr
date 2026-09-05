@@ -86,9 +86,9 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 		actions = append(actions, "Configuré: ReShade.ini")
 	}
 
-	// 6. Configurer la variable d'environnement pour éviter le conflit avec le ReShade interne de LukeRoss
+	// 6. Neutraliser la détection de conflit entre ReShade 6.8 et le ReShade interne de LukeRoss
 	if !dryRun {
-		ensureLoadingCheckDisabled()
+		ensureLukeRossCompatibility(gameDir)
 	}
 
 	// 7. Écriture du manifest pour désinstallation propre
@@ -100,11 +100,23 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 	return actions, nil
 }
 
-func ensureLoadingCheckDisabled() {
-	// Sur Windows, s'assure que RESHADE_DISABLE_LOADING_CHECK=1 est configuré
-	// pour permettre la cohabitation entre ReShade 6.8 et le ReShade interne du mod RealVR
-	if os.Getenv("RESHADE_DISABLE_LOADING_CHECK") == "" {
-		_ = os.Setenv("RESHADE_DISABLE_LOADING_CHECK", "1")
+// ensureLukeRossCompatibility neutralise l'export 'ReShadeVersion' dans le dxgi.dll de LukeRoss.
+// ReShade 6.x effectue un GetProcAddress(module, "ReShadeVersion") dur dans DllMain
+// pour refuser de s'exécuter si une autre instance existe. En renommant cet export d'1 lettre,
+// ReShade 6.x s'initialise parfaitement aux côtés du mod LukeRoss sans aucun conflit.
+func ensureLukeRossCompatibility(gameDir string) {
+	dxgiPath := filepath.Join(gameDir, "dxgi.dll")
+	data, err := os.ReadFile(dxgiPath)
+	if err != nil {
+		return
+	}
+
+	needle := []byte("ReShadeVersion\x00")
+	idx := strings.Index(string(data), string(needle))
+	if idx != -1 {
+		// Remplacer "ReShadeVersion" par "ReShxdeVersion"
+		copy(data[idx:], []byte("ReShxdeVersion\x00"))
+		_ = os.WriteFile(dxgiPath, data, 0644)
 	}
 }
 
