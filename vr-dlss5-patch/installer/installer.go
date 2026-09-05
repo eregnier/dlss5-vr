@@ -86,13 +86,26 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 		actions = append(actions, "Configuré: ReShade.ini")
 	}
 
-	// 6. Écriture du manifest pour désinstallation propre
+	// 6. Configurer la variable d'environnement pour éviter le conflit avec le ReShade interne de LukeRoss
+	if !dryRun {
+		ensureLoadingCheckDisabled()
+	}
+
+	// 7. Écriture du manifest pour désinstallation propre
 	if !dryRun && len(installedFiles) > 0 {
 		manifestPath := filepath.Join(gameDir, ManifestFile)
 		_ = os.WriteFile(manifestPath, []byte(strings.Join(installedFiles, "\n")), 0644)
 	}
 
 	return actions, nil
+}
+
+func ensureLoadingCheckDisabled() {
+	// Sur Windows, s'assure que RESHADE_DISABLE_LOADING_CHECK=1 est configuré
+	// pour permettre la cohabitation entre ReShade 6.8 et le ReShade interne du mod RealVR
+	if os.Getenv("RESHADE_DISABLE_LOADING_CHECK") == "" {
+		_ = os.Setenv("RESHADE_DISABLE_LOADING_CHECK", "1")
+	}
 }
 
 // Uninstall supprime les fichiers installés par ce patch d'après le manifest.
