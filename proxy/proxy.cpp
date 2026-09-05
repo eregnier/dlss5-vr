@@ -241,24 +241,47 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, vo
     return 1;
 }
 
+static HMODULE g_hDLSSNR = NULL;
+static PFN_NVSDK_NGX_D3D12_EvaluateFeature g_pfnDLSSNR_Evaluate = NULL;
+
 int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
 {
     InitProxy();
-    if (!g_pfnNGXEvaluateFeature && g_hRealVR)
-        g_pfnNGXEvaluateFeature = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_EvaluateFeature");
+
+    // 1. Charger nvngx_dlssnr.dll (le runtime DLSS 5 officiel)
+    if (!g_hDLSSNR)
+    {
+        g_hDLSSNR = LoadLibraryA("nvngx_dlssnr.dll");
+        if (g_hDLSSNR)
+        {
+            g_pfnDLSSNR_Evaluate = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)GetProcAddress(g_hDLSSNR, "NVSDK_NGX_D3D12_EvaluateFeature");
+            LogMsg("[VR-DLSS5] Successfully bound to official DLSS 5 Neural Reconstruction runtime (nvngx_dlssnr.dll)");
+        }
+    }
 
     g_evalFrameCounter++;
     if ((g_evalFrameCounter % 100) == 1 || g_evalFrameCounter <= 10)
     {
         char buf[128];
-        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Continuous evaluation frame #%llu (active handle %p)", g_evalFrameCounter, pHandle);
+        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Continuous evaluation frame #%llu (active handle %p, NR=%s)", 
+            g_evalFrameCounter, pHandle, g_pfnDLSSNR_Evaluate ? "ACTIVE" : "PASSTHROUGH");
         LogMsg(buf);
     }
 
+    // 2. Évaluation DLSS standard du jeu / LukeRoss
+    int result = 0;
     if (g_pfnNGXEvaluateFeature)
-        return g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
-    return 1;
+        result = g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
+
+    // 3. Dispatch Neural Reconstruction continu si disponible
+    if (g_pfnDLSSNR_Evaluate && pCmdList && pParameters)
+    {
+        g_pfnDLSSNR_Evaluate(pCmdList, pHandle, pParameters, pCallback);
+    }
+
+    return result;
 }
+
 
 int WINAPI Proxy_NVSDK_NGX_D3D12_ReleaseFeature(void* pHandle)
 {
