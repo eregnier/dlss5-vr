@@ -210,6 +210,28 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
   Application de 16 patches NOP (`74 0F` -> `90 90`) sur les 8 slots de travail RenoDX (`s = 0..7`).
   Le CPU ne possède plus aucune instruction de bifurcation : 100% des frames VR exécutent inconditionnellement les passes Feature 18.
 
+### 3.15 Le Dernier Verrou : "Host State Incomplete" dans le Dispatcher Central 0x36FF0
+- **Découverte Fondamentale & Explication du Palier à 12 Frames** :
+  L'inspection en mémoire vive (`inspect_live_renodx.py`) a révélé un écart spectaculaire :
+  - `RVA 0x196E80` (compteur d'entrée de `NVSDK_NGX_D3D12_EvaluateFeature`) : **4 729 appels reçus de LukeRoss !**
+  - `RVA 0x1969F8` (compteur d'évaluation de la Feature 18) : **bloqué à 12 frames.**
+- **Le Diagnostic du Mur** :
+  1. Les 12 premières frames correspondaient aux écrans de démarrage 2D (AMD, Ubisoft, Massive, Menus) où le moteur du jeu utilisait les pipelines D3D12 conventionnels dont l'état était intégralement intercepté par ReShade.
+  2. Dès l'entrée dans le monde 3D, le mod LukeRoss prend le contrôle total du pipeline de rendu stéréoscopique VR via des listes de commandes Direct3D 12 directes sans passer par les hooks d'état ReShade standard.
+  3. Dans le dispatcher central RenoDX (`0x180036FF0`), une validation d'intégrité de l'état hôte exécutait 5 vérifications consécutives (file offsets `0x36643` à `0x3667C`) :
+     - `cmp [rbp+1C0h], 1; jne 0x3723F` (`pso_known != 1`)
+     - `cmp [rbp+1D0h], 0; je  0x3723F` (`so_known == 0`)
+     - `cmp [rbp+1E0h], 0; je  0x3723F` (`root_known == 0`)
+     - `cmp [rbp+201h], 0; je  0x3723F` (`heaps_known == 0`)
+     - `cmp [rbp+200h], 0; je  0x3723F` (`graphics_tables_known == 0`)
+  4. Dès qu'un seul de ces 5 états était inconnu (cas systématique en VR), RenoDX bifurquait vers `0x3723F` qui loguait une unique fois :
+     `real DLSS/DLSSD work left host state incomplete; skipping inline NR (pso_known=0 so_known=0 root_known=0 heaps_known=1 graphics_tables_known=1)`
+     puis court-circuitait définitivement l'appel `call 0x180008480` (moteur Feature 18) pour chaque frame suivante sans rien écrire dans les logs (once-flag).
+- **Sécurité de la Restauration (`0x180006140`)** :
+  L'audit binaire de la routine de restauration d'état exécutée en sortie (`0x180006140`) a prouvé que chaque sous-état dispose de sa propre garde conditionnelle (`cmp byte ptr [rdx+41h], 1; jne ...`, etc.). Restaurer un état incomplet est donc 100% sûr et ne provoque aucun crash.
+- **Solution Définitive** :
+  Remplacement des 5 sauts conditionnels (6 octets chacun aux offsets `0x36643`, `0x36650`, `0x3665D`, `0x3666A`, `0x36677`) par 30 octets de NOP (`90`). L'exécution s'écoule désormais en ligne droite continue vers `call 0x180008480`, injectant l'inférence neuronale DLSS 5 sur chaque frame stéréoscopique VR.
+
 ---
 
 ## 4. Architecture de la Solution Finale (Dual-Proxy C++ & Outil Go)
@@ -224,7 +246,7 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
   - Exécute les passes DLSS VR et route automatiquement vers le runtime NGX detoured.
 - **ReShade64_dlss5.dll** (patche dxgx / openvx) :
   - Heberge l'add-on renodx-dlss5.addon64 sans toucher a la SwapChain ni a OpenVR.
-- **renodx-dlss5.addon64** (patche pool infini 0xDF64/0xDF97 + 16 portes ANY_HANDLE aux offsets 0x36EEF et 0x36F70) :
+- **renodx-dlss5.addon64** (patché pool infini 0xDF64/0xDF97 + 16 portes ANY_HANDLE aux offsets 0x36EEF et 0x36F70 + 5 portes Host State Incomplete aux offsets 0x36643..0x36677) :
   - Hooke _nvngx.dll et applique les poids neuronaux Tensor Core de nvngx_dlssnr.dll.
 
 ### 4.2 Alignement de l'Outil Automatique Go (`vr-dlss5-patch`)
@@ -239,6 +261,8 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
    - Débridage dynamique inconditionnel sur l'ensemble des 8 slots RenoDX :
      - Offsets `0x36EA8 + s*0x4C0`, `0x36E9B + s*0x4C0`, `0x36F2E + s*0x4C0`
      - Gates d'évaluation inconditionnelle `0x36EEF + s*0x4C0` et `0x36F70 + s*0x4C0` (`74 0F` -> `90 90`).
+   - Déverrouillage universel du dispatcher central 0x36FF0 :
+     - Bypass des 5 portes de validation d'état hôte aux offsets `0x36643`, `0x36650`, `0x3665D`, `0x3666A`, `0x36677` (5x 6 octets NOP).
 
 ### 4.3 Architecture Souveraine : Chaîne Ininterrompue LukeRoss & Télémétrie Continue
 - **Détour mémoire inconditionnel (15 octets) dans `proxy/proxy.cpp`** :

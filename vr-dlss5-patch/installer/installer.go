@@ -301,6 +301,26 @@ func ensureLukeRossCompatibility(gameDir, proxyTarget string) {
 			}
 		}
 
+		// Patch des 5 verrous de validation d'état hôte (Host State Incomplete) dans le dispatcher central 0x36FF0 :
+		// Offsets 0x36643, 0x36650, 0x3665D, 0x3666A, 0x36677 (chacun 6 octets de conditional jump vers le skip)
+		hostGates := []struct {
+			offset   int
+			expected []byte
+		}{
+			{0x36643, []byte{0x0F, 0x85, 0xF6, 0x01, 0x00, 0x00}}, // pso_known != 1 -> skip
+			{0x36650, []byte{0x0F, 0x84, 0xE9, 0x01, 0x00, 0x00}}, // so_known == 0 -> skip
+			{0x3665D, []byte{0x0F, 0x84, 0xDC, 0x01, 0x00, 0x00}}, // root_known == 0 -> skip
+			{0x3666A, []byte{0x0F, 0x84, 0xCF, 0x01, 0x00, 0x00}}, // heaps_known == 0 -> skip
+			{0x36677, []byte{0x0F, 0x84, 0xC2, 0x01, 0x00, 0x00}}, // graphics_tables_known == 0 -> skip
+		}
+		nop6 := []byte{0x90, 0x90, 0x90, 0x90, 0x90, 0x90}
+		for _, g := range hostGates {
+			if len(aData) > g.offset+6 && bytes.Equal(aData[g.offset:g.offset+6], g.expected) {
+				copy(aData[g.offset:g.offset+6], nop6)
+				aModified = true
+			}
+		}
+
 		if aModified {
 			_ = os.WriteFile(addonPath, aData, 0644)
 		}
