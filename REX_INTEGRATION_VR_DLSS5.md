@@ -189,6 +189,27 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
   - RenoDX DLSS 5 fonctionne en **mode autonome / headless** : ses paramètres sont lus directement depuis `ReShade.ini` (`[RenoDX.DLSS5] EnableHooks=1`, `NRIntensity=2.5`). Le modèle neuronal est donc **actif en permanence à chaque frame** dès le lancement du jeu sans aucune intervention manuelle.
   - L'overlay VR du mod LukeRoss reste accessible via sa touche dédiée configurée dans `RealVR.ini` : `KeyOverlay=112` (**Touche F1**).
 
+### 3.13 Alignement d'Instruction du Trampoline Proxy (14 vs 15 octets)
+- **Symptôme** : Le proxy interceptait bien les frames mais pouvait induire des instabilités ou altérer l'état x64 non-volatile sur les frames prolongées.
+- **Analyse Binaire** :
+  Le prologue officiel de `RealVR64:NVSDK_NGX_D3D12_EvaluateFeature` mesure 15 octets :
+  `mov [rsp+20h], r9` (5o) + `mov [rsp+8], rcx` (5o) + `push rbp` (1o) + `push rsi` (1o) + `push rdi` (1o) + `push r12` (**2 octets : `41 54`**) = **15 octets**.
+  Un trampoline de 14 octets tronquait `41 54` au milieu, transformant l'instruction résiduelle `54` en `push rsp` au lieu de `push r12`, corrompant le registre non-volatile `r12` lors du retour `pop r12`.
+- **Solution** :
+  Trampoline étendu à 15 octets stricts avec saut `[rip+0]` (14 octets) + 1 NOP de padding à l'offset 14, garantissant l'intégrité intégrale de l'ABI x64.
+
+### 3.14 Déverrouillage Inconditionnel des Portes RenoDX aux Offsets 0x36EEF et 0x36F70 (8 Slots)
+- **Symptôme** : RenoDX évaluait parfaitement les 10 premières frames stéréoscopiques (`inline feature 18 evaluation succeeded (count=1..10)`), puis cessait toute évaluation alors que le jeu et le proxy continuaient indéfiniment.
+- **Dissection du Flot de Contrôle x64 (`0x1800376C0` à `0x180037997`)** :
+  1. Dès la 2e frame, le chemin rapide saute inconditionnellement à `0x180037885`.
+  2. Sur ce tronc commun, RenoDX effectue un lookup du handle dans sa table de hashage via `call 0x180036990`.
+  3. En VR sous enregistrement paresseux (*lazy registration*), deux portes conditionnelles faisaient sauter l'évaluation dès que le test de handle retournait 0 :
+     - **Gate 1 Pré-DLSS (`0x36EEF + s*0x4C0`)** : `74 0F` (`je 0x180037900`) sautait `call 0x180003CC0` (Feature 18).
+     - **Gate 2 Post-DLSS (`0x36F70 + s*0x4C0`)** : `74 0F` (`je 0x180037981`) sautait `call 0x180036FF0` (dispatch de reconstruction neuronale).
+- **Solution** :
+  Application de 16 patches NOP (`74 0F` -> `90 90`) sur les 8 slots de travail RenoDX (`s = 0..7`).
+  Le CPU ne possède plus aucune instruction de bifurcation : 100% des frames VR exécutent inconditionnellement les passes Feature 18.
+
 ---
 
 ## 4. Architecture de la Solution Finale (Dual-Proxy C++ & Outil Go)
@@ -203,7 +224,7 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
   - Exécute les passes DLSS VR et route automatiquement vers le runtime NGX detoured.
 - **ReShade64_dlss5.dll** (patche dxgx / openvx) :
   - Heberge l'add-on renodx-dlss5.addon64 sans toucher a la SwapChain ni a OpenVR.
-- **renodx-dlss5.addon64** (patche 0xDFF5/0xDF64/0xDF97 pool infini + 8 slots ANY_HANDLE) :
+- **renodx-dlss5.addon64** (patche pool infini 0xDF64/0xDF97 + 16 portes ANY_HANDLE aux offsets 0x36EEF et 0x36F70) :
   - Hooke _nvngx.dll et applique les poids neuronaux Tensor Core de nvngx_dlssnr.dll.
 
 ### 4.2 Alignement de l'Outil Automatique Go (`vr-dlss5-patch`)
@@ -215,16 +236,18 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
    - Neutralisation des hooks `dxgi.dll` -> `dxgx.dll` et `openvr_api.dll` -> `openvx_api.dll` dans ReShade64_dlss5.dll
    - Débridage du pool de travail à `0xDFF5` (`c6 42 60 00`), `0xDF64` (`e9 8c 00 00 00 90`) et `0xDF97` (`e9 59 00 00 00 90 90`) dans renodx-dlss5.addon64
    - Débridage de l'évaluation continue à `0xA13F` (`90 90`) et bypass des logs à `0xA222`
-   - Débridage dynamique `ANY_HANDLE` sur l'ensemble des 8 slots RenoDX (offsets `0x36EA8 + i*0x4C0`, `0x36E9B + i*0x4C0`, `0x36F2E + i*0x4C0`) dans `renodx-dlss5.addon64`.
+   - Débridage dynamique inconditionnel sur l'ensemble des 8 slots RenoDX :
+     - Offsets `0x36EA8 + s*0x4C0`, `0x36E9B + s*0x4C0`, `0x36F2E + s*0x4C0`
+     - Gates d'évaluation inconditionnelle `0x36EEF + s*0x4C0` et `0x36F70 + s*0x4C0` (`74 0F` -> `90 90`).
 
 ### 4.3 Architecture Souveraine : Chaîne Ininterrompue LukeRoss & Télémétrie Continue
-- **Détour mémoire inconditionnel (14 octets) dans `proxy/proxy.cpp`** :
-  Dès que `RealVR64.dll` est chargé par le proxy au démarrage du jeu, notre DLL pose un hook mémoire direct permanent sur `RealVR64:NVSDK_NGX_D3D12_EvaluateFeature` (`jmp [rip+0]` 14 octets avec trampoline de retour).
+- **Détour mémoire inconditionnel (15 octets) dans `proxy/proxy.cpp`** :
+  Dès que `RealVR64.dll` est chargé par le proxy au démarrage du jeu, notre DLL pose un hook mémoire direct permanent sur `RealVR64:NVSDK_NGX_D3D12_EvaluateFeature` (`jmp [rip+0]` 14 octets + 1 NOP avec trampoline de retour de 15 octets aligné sur `push r12`).
   - Ce hook garantit la télémétrie en direct sans perturber le cycle de vie des frames VR.
   - Notre proxy appelle systématiquement `g_pfnNGXEvaluateFeature`, garantissant que LukeRoss exécute 100% de ses évaluations stéréoscopiques et maintient la parité des frames.
-  - L'évaluation neuronale DLSS 5 est ensuite déclenchée en aval par le hook de RenoDX sur `_nvngx.dll`.
+  - L'évaluation neuronale DLSS 5 est ensuite déclenchée en aval par le hook inconditionnel de RenoDX sur `_nvngx.dll`.
 - **Télémétrie en temps réel dans `vr_dlss5_proxy.log`** :
-  Enregistrement continu du compteur de frames VR (`[VR-DLSS5-Telemetry] Continuous VR frame #X: gameHandle=%p, eval_ret=0x00000000`).
+  Enregistrement continu du compteur de frames VR (`[VR-DLSS5-Telemetry] Continuous VR frame #X: gameHandle=%p, eval_ret=0x00000001`).
 - **Indépendance Totale & Généralisation** :
   Cette mécanique est 100% universelle et reproductible pour tous les jeux LukeRoss VR (Avatar, Cyberpunk, Horizon, etc.).
 

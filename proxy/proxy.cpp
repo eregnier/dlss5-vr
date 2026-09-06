@@ -63,32 +63,34 @@ static void InitProxy()
         {
             LogMsg("[Proxy] Found RealVR64:NVSDK_NGX_D3D12_EvaluateFeature, installing permanent detour...");
             DWORD oldProtect;
-            if (VirtualProtect(pRealVREval, 14, PAGE_EXECUTE_READWRITE, &oldProtect))
+            if (VirtualProtect(pRealVREval, 15, PAGE_EXECUTE_READWRITE, &oldProtect))
             {
-                // Sauvegarder les 14 octets originaux pour le trampoline
+                // Sauvegarder les 15 octets originaux pour le trampoline
+                // 5 (mov) + 5 (mov) + 1 (push rbp) + 1 (push rsi) + 1 (push rdi) + 2 (push r12: 41 54) = 15 octets
                 static BYTE s_trampoline[32];
-                memcpy(s_trampoline, pRealVREval, 14);
+                memcpy(s_trampoline, pRealVREval, 15);
                 
-                // Saut du trampoline vers pRealVREval + 14
-                s_trampoline[14] = 0xFF;
-                s_trampoline[15] = 0x25;
-                *(DWORD*)(&s_trampoline[16]) = 0;
-                *(ULONG_PTR*)(&s_trampoline[20]) = ((ULONG_PTR)pRealVREval) + 14;
+                // Saut du trampoline vers pRealVREval + 15
+                s_trampoline[15] = 0xFF;
+                s_trampoline[16] = 0x25;
+                *(DWORD*)(&s_trampoline[17]) = 0;
+                *(ULONG_PTR*)(&s_trampoline[21]) = ((ULONG_PTR)pRealVREval) + 15;
                 DWORD trampProtect;
                 VirtualProtect(s_trampoline, sizeof(s_trampoline), PAGE_EXECUTE_READWRITE, &trampProtect);
                 g_pfnNGXEvaluateFeature = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)(void*)s_trampoline;
 
-                // Installer jmp qword ptr [rip+0] vers Proxy_NVSDK_NGX_D3D12_EvaluateFeature
-                BYTE patch[14];
+                // Installer jmp qword ptr [rip+0] vers Proxy_NVSDK_NGX_D3D12_EvaluateFeature (14 octets) + 1 NOP
+                BYTE patch[15];
                 patch[0] = 0xFF;
                 patch[1] = 0x25;
                 *(DWORD*)(&patch[2]) = 0;
                 extern int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void*, void*, void*, void*);
                 *(ULONG_PTR*)(&patch[6]) = (ULONG_PTR)Proxy_NVSDK_NGX_D3D12_EvaluateFeature;
-                memcpy(pRealVREval, patch, 14);
+                patch[14] = 0x90; // NOP padding
+                memcpy(pRealVREval, patch, 15);
 
-                VirtualProtect(pRealVREval, 14, oldProtect, &oldProtect);
-                LogMsg("[Proxy] SUCCESS: Permanent direct detour installed on RealVR64:EvaluateFeature!");
+                VirtualProtect(pRealVREval, 15, oldProtect, &oldProtect);
+                LogMsg("[Proxy] SUCCESS: Permanent direct detour installed on RealVR64:EvaluateFeature (15 bytes)!");
             }
             else
             {

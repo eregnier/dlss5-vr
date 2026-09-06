@@ -287,6 +287,18 @@ func ensureLukeRossCompatibility(gameDir, proxyTarget string) {
 				copy(aData[skipOff:skipOff+2], []byte{0x90, 0x90})
 				aModified = true
 			}
+			// Offset 0x36EEF + s*0x4C0 : 74 0F -> 90 90 (force évaluation inconditionnelle pré-DLSS de la Feature 18)
+			gate1Off := 0x36EEF + s*0x4C0
+			if len(aData) > gate1Off+2 && bytes.Equal(aData[gate1Off:gate1Off+2], []byte{0x74, 0x0f}) {
+				copy(aData[gate1Off:gate1Off+2], []byte{0x90, 0x90})
+				aModified = true
+			}
+			// Offset 0x36F70 + s*0x4C0 : 74 0F -> 90 90 (force dispatch inconditionnel post-DLSS de la Feature 18)
+			gate2Off := 0x36F70 + s*0x4C0
+			if len(aData) > gate2Off+2 && bytes.Equal(aData[gate2Off:gate2Off+2], []byte{0x74, 0x0f}) {
+				copy(aData[gate2Off:gate2Off+2], []byte{0x90, 0x90})
+				aModified = true
+			}
 		}
 
 		if aModified {
