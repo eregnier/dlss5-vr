@@ -46,7 +46,18 @@ static void InitProxy()
 
     LogMsg("[Proxy] Initializing VR-DLSS5 Dual Proxy...");
 
-    // 1. Charger RealVR64.dll (LukeRoss VR mod) d'abord
+    // 1. Charger ReShade 6.8 (DLSS 5 host) d'abord pour installer les hooks NGX proprement
+    g_hReShade = LoadLibraryA("ReShade64_dlss5.dll");
+    if (g_hReShade)
+    {
+        LogMsg("[Proxy] Successfully loaded ReShade64_dlss5.dll (NGX hooks armed)");
+    }
+    else
+    {
+        LogMsg("[Proxy] WARNING: Could not load ReShade64_dlss5.dll");
+    }
+
+    // 2. Charger RealVR64.dll (LukeRoss VR mod) ensuite
     g_hRealVR = LoadLibraryA("RealVR64.dll");
     if (g_hRealVR)
     {
@@ -57,62 +68,15 @@ static void InitProxy()
         g_pfnDXGIDeclareAdapterRemovalSupport = (PFN_DXGIDeclareAdapterRemovalSupport)GetProcAddress(g_hRealVR, "DXGIDeclareAdapterRemovalSupport");
         g_pfnDXGIGetDebugInterface1 = (PFN_DXGIGetDebugInterface1)GetProcAddress(g_hRealVR, "DXGIGetDebugInterface1");
 
-        // Detour inconditionnel de NVSDK_NGX_D3D12_EvaluateFeature dans RealVR64
-        void* pRealVREval = (void*)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_EvaluateFeature");
-        if (pRealVREval)
-        {
-            LogMsg("[Proxy] Found RealVR64:NVSDK_NGX_D3D12_EvaluateFeature, installing permanent detour...");
-            DWORD oldProtect;
-            if (VirtualProtect(pRealVREval, 15, PAGE_EXECUTE_READWRITE, &oldProtect))
-            {
-                // Sauvegarder les 15 octets originaux pour le trampoline
-                // 5 (mov) + 5 (mov) + 1 (push rbp) + 1 (push rsi) + 1 (push rdi) + 2 (push r12: 41 54) = 15 octets
-                static BYTE s_trampoline[32];
-                memcpy(s_trampoline, pRealVREval, 15);
-                
-                // Saut du trampoline vers pRealVREval + 15
-                s_trampoline[15] = 0xFF;
-                s_trampoline[16] = 0x25;
-                *(DWORD*)(&s_trampoline[17]) = 0;
-                *(ULONG_PTR*)(&s_trampoline[21]) = ((ULONG_PTR)pRealVREval) + 15;
-                DWORD trampProtect;
-                VirtualProtect(s_trampoline, sizeof(s_trampoline), PAGE_EXECUTE_READWRITE, &trampProtect);
-                g_pfnNGXEvaluateFeature = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)(void*)s_trampoline;
-
-                // Installer jmp qword ptr [rip+0] vers Proxy_NVSDK_NGX_D3D12_EvaluateFeature (14 octets) + 1 NOP
-                BYTE patch[15];
-                patch[0] = 0xFF;
-                patch[1] = 0x25;
-                *(DWORD*)(&patch[2]) = 0;
-                extern int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void*, void*, void*, void*);
-                *(ULONG_PTR*)(&patch[6]) = (ULONG_PTR)Proxy_NVSDK_NGX_D3D12_EvaluateFeature;
-                patch[14] = 0x90; // NOP padding
-                memcpy(pRealVREval, patch, 15);
-
-                VirtualProtect(pRealVREval, 15, oldProtect, &oldProtect);
-                LogMsg("[Proxy] SUCCESS: Permanent direct detour installed on RealVR64:EvaluateFeature (15 bytes)!");
-            }
-            else
-            {
-                LogMsg("[Proxy] WARNING: VirtualProtect failed on RealVR64:EvaluateFeature");
-            }
-        }
+        // Résolution directe sans altération de code ni trampoline instable
+        g_pfnNGXCreateFeature = (PFN_NVSDK_NGX_D3D12_CreateFeature)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_CreateFeature");
+        g_pfnNGXEvaluateFeature = (PFN_NVSDK_NGX_D3D12_EvaluateFeature)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_EvaluateFeature");
+        g_pfnNGXReleaseFeature = (PFN_NVSDK_NGX_D3D12_ReleaseFeature)GetProcAddress(g_hRealVR, "NVSDK_NGX_D3D12_ReleaseFeature");
+        LogMsg("[Proxy] RealVR64 exports resolved natively (zero memory corruption)");
     }
     else
     {
         LogMsg("[Proxy] WARNING: RealVR64.dll not found, falling back to system dxgi.dll");
-    }
-
-
-    // 2. Charger ReShade 6.8 (DLSS 5 host) ensuite
-    g_hReShade = LoadLibraryA("ReShade64_dlss5.dll");
-    if (g_hReShade)
-    {
-        LogMsg("[Proxy] Successfully loaded ReShade64_dlss5.dll");
-    }
-    else
-    {
-        LogMsg("[Proxy] WARNING: Could not load ReShade64_dlss5.dll");
     }
 
     // 3. Repli de secours vers system32 dxgi si une fonction n'est pas dans RealVR
