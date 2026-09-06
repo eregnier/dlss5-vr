@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <dxgi.h>
 #include <xinput.h>
+#include <mmsystem.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
@@ -11,6 +12,8 @@
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "xinput.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "gdi32.lib")
 
 typedef HRESULT (WINAPI *PFN_CreateDXGIFactory)(REFIID riid, void **ppFactory);
 typedef HRESULT (WINAPI *PFN_CreateDXGIFactory1)(REFIID riid, void **ppFactory);
@@ -48,6 +51,8 @@ static void LogMsg(const char *msg)
         fclose(f);
     }
 }
+
+static DWORD WINAPI InputWatcherThread(LPVOID lpParam);
 
 static void InitProxy()
 {
@@ -104,7 +109,11 @@ static void InitProxy()
         if (!g_pfnDXGIDeclareAdapterRemovalSupport) g_pfnDXGIDeclareAdapterRemovalSupport = (PFN_DXGIDeclareAdapterRemovalSupport)GetProcAddress(g_hSysDxgi, "DXGIDeclareAdapterRemovalSupport");
         if (!g_pfnDXGIGetDebugInterface1) g_pfnDXGIGetDebugInterface1 = (PFN_DXGIGetDebugInterface1)GetProcAddress(g_hSysDxgi, "DXGIGetDebugInterface1");
     }
-    LogMsg("[Proxy] Proxy ready.");
+
+    // 4. Lancer le thread d'écoute autonome pour F6 et Select+L3
+    CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InputWatcherThread, NULL, 0, NULL);
+
+    LogMsg("[Proxy] Proxy ready (Autonomous Input Thread armed).");
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
@@ -743,18 +752,37 @@ static void PollInput()
         toggleRequested = true;
     }
 
+    // Polling XInput (Xbox, emulators)
     XINPUT_STATE xstate;
     ZeroMemory(&xstate, sizeof(XINPUT_STATE));
-    bool padConnected = false;
+    bool xinputConnected = false;
     for (DWORD i = 0; i < 4; i++) {
         if (XInputGetState(i, &xstate) == ERROR_SUCCESS) {
-            padConnected = true;
+            xinputConnected = true;
             break;
         }
     }
+    WORD xButtons = xinputConnected ? xstate.Gamepad.wButtons : 0;
 
-    WORD buttons = padConnected ? xstate.Gamepad.wButtons : 0;
-    bool comboDown = ((buttons & 0x0060) == 0x0060); // BACK (0x20) | LEFT_THUMB (0x40)
+    // Polling DirectInput / winmm (DualSense PS5, manettes HID natives)
+    JOYINFOEX jie;
+    ZeroMemory(&jie, sizeof(JOYINFOEX));
+    jie.dwSize = sizeof(JOYINFOEX);
+    jie.dwFlags = JOY_RETURNALL;
+    bool dinputConnected = false;
+    for (UINT j = 0; j < 4; j++) {
+        if (joyGetPosEx(j, &jie) == JOYERR_NOERROR) {
+            dinputConnected = true;
+            break;
+        }
+    }
+    DWORD dButtons = dinputConnected ? jie.dwButtons : 0;
+
+    // Combinaison universelle Select + L3 (Back + Clic Stick Gauche)
+    // Xbox: BACK (0x20) | LEFT_THUMB (0x40) = 0x60
+    // DualSense DirectInput: Create/Select (bit 8 = 0x100) | L3 (bit 10 = 0x400) = 0x500
+    bool comboDown = ((xButtons & 0x0060) == 0x0060) || 
+                     ((dButtons & 0x0500) == 0x0500);
     static bool s_prevCombo = false;
     if (comboDown && !s_prevCombo) {
         toggleRequested = true;
@@ -764,7 +792,9 @@ static void PollInput()
     if (toggleRequested) {
         g_hudVisible = !g_hudVisible;
         char buf[128];
-        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] Overlay toggled: %s", g_hudVisible ? "OPEN" : "CLOSED");
+        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] Overlay toggled: %s (Source: %s)", 
+            g_hudVisible ? "OPEN" : "CLOSED",
+            g_keys[VK_F6].justPressed ? "Keyboard F6" : "Gamepad Select+L3");
         LogMsg(buf);
     }
 
@@ -781,9 +811,9 @@ static void PollInput()
     UpdateKey(VK_SPACE, now);
     UpdateKey(VK_RETURN, now);
 
-    // Close HUD
+    // Close HUD: Escape / Gamepad B (Xbox B: 0x2000 / DualSense Circle: bit 2 = 0x0004)
     static bool s_prevPadB = false;
-    bool padB = (buttons & XINPUT_GAMEPAD_B) != 0;
+    bool padB = ((xButtons & XINPUT_GAMEPAD_B) != 0) || ((dButtons & 0x0004) != 0);
     if (g_keys[VK_ESCAPE].justPressed || (padB && !s_prevPadB)) {
         g_hudVisible = false;
         LogMsg("[VR-DLSS5-HUD] Overlay closed");
@@ -791,9 +821,9 @@ static void PollInput()
     }
     s_prevPadB = padB;
 
-    // Cycle Position: Tab or Gamepad Y
+    // Cycle Position: Tab or Gamepad Y (Xbox Y: 0x8000 / DualSense Triangle: bit 3 = 0x0008)
     static bool s_prevPadY = false;
-    bool padY = (buttons & XINPUT_GAMEPAD_Y) != 0;
+    bool padY = ((xButtons & XINPUT_GAMEPAD_Y) != 0) || ((dButtons & 0x0008) != 0);
     if (g_keys[VK_TAB].justPressed || (padY && !s_prevPadY)) {
         g_hudPosIndex = (g_hudPosIndex + 1) % 4;
         static const char* posNames[] = { "Bottom-Center", "Top-Center", "Top-Right", "Top-Left" };
@@ -805,9 +835,9 @@ static void PollInput()
     }
     s_prevPadY = padY;
 
-    // Direct Scale Toggle: F7 (Keyboard) or R3 (Right Stick Click)
+    // Direct Scale Toggle: F7 (Keyboard) or R3 (Right Stick Click: Xbox 0x0080 / DualSense bit 11 = 0x0800)
     static bool s_prevPadR3 = false;
-    bool padR3 = (buttons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
+    bool padR3 = ((xButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0) || ((dButtons & 0x0800) != 0);
     if (g_keys[VK_F7].justPressed || (padR3 && !s_prevPadR3)) {
         g_hudScale = (g_hudScale + 1) % 3;
         static const char* scaleNames[] = { "1.0x (Compact)", "1.5x (Balanced Q3)", "2.0x (Comfort Q3)" };
@@ -822,8 +852,10 @@ static void PollInput()
     // Navigate Rows (5 rows: 0 to 4)
     static bool s_prevPadUp = false;
     static bool s_prevPadDown = false;
-    bool padUp = (buttons & XINPUT_GAMEPAD_DPAD_UP) != 0;
-    bool padDown = (buttons & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
+    bool padUp = ((xButtons & XINPUT_GAMEPAD_DPAD_UP) != 0) || 
+                 (dinputConnected && ((jie.dwPOV == 0 || jie.dwPOV == 31500 || jie.dwPOV == 4500) || jie.dwYpos < 16000));
+    bool padDown = ((xButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0) || 
+                   (dinputConnected && ((jie.dwPOV == 18000 || jie.dwPOV == 13500 || jie.dwPOV == 22500) || jie.dwYpos > 48000));
 
     if (g_keys[VK_UP].justPressed || (padUp && !s_prevPadUp)) {
         g_activeRow = (g_activeRow + 4) % 5;
@@ -844,8 +876,10 @@ static void PollInput()
 
     static uint64_t s_padLeftSince = 0, s_padLeftRepeat = 0;
     static uint64_t s_padRightSince = 0, s_padRightRepeat = 0;
-    bool padLeft = (buttons & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
-    bool padRight = (buttons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
+    bool padLeft = ((xButtons & XINPUT_GAMEPAD_DPAD_LEFT) != 0) || 
+                   (dinputConnected && ((jie.dwPOV == 27000 || jie.dwPOV == 22500 || jie.dwPOV == 31500) || jie.dwXpos < 16000));
+    bool padRight = ((xButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0) || 
+                    (dinputConnected && ((jie.dwPOV == 9000 || jie.dwPOV == 4500 || jie.dwPOV == 13500) || jie.dwXpos > 48000));
 
     if (padLeft) {
         if (s_padLeftSince == 0) {
@@ -868,7 +902,7 @@ static void PollInput()
     }
 
     static bool s_prevPadA = false;
-    bool padA = (buttons & XINPUT_GAMEPAD_A) != 0;
+    bool padA = ((xButtons & XINPUT_GAMEPAD_A) != 0) || ((dButtons & 0x0002) != 0); // Xbox A or DualSense Cross
     bool actionTrigger = g_keys[VK_SPACE].justPressed || g_keys[VK_RETURN].justPressed || (padA && !s_prevPadA);
     s_prevPadA = padA;
 
@@ -926,6 +960,9 @@ static void PollInput()
         g_hasPendingSave = true;
         g_lastChangeTick = now;
 
+        if (!g_renodxBase) {
+            g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
+        }
         if (g_renodxBase) {
             *(uint8_t*)(g_renodxBase + 0x192F68) = g_masterEnable ? 1 : 0;
             *(float*)(g_renodxBase + 0x19364C) = g_nrIntensity;
@@ -935,6 +972,195 @@ static void PollInput()
             *(uint8_t*)(g_renodxBase + 0x1935E8) = 1; // set dirty flag
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Desktop & VR Mirror Floating OSD Window (Transparent Layered Per-Pixel Alpha)
+// ----------------------------------------------------------------------------
+static HWND g_hOSDWnd = NULL;
+static HDC g_hOSDDC = NULL;
+static HBITMAP g_hOSDBmp = NULL;
+static uint32_t* g_pOSDBits = NULL;
+static int g_currentOSDScale = -1;
+
+static void UpdateOSDWindow(bool visible)
+{
+    if (!visible) {
+        if (g_hOSDWnd && IsWindowVisible(g_hOSDWnd)) {
+            ShowWindow(g_hOSDWnd, SW_HIDE);
+        }
+        return;
+    }
+
+    // 1. Enregistrer la classe de fenêtre
+    static bool s_classRegistered = false;
+    if (!s_classRegistered) {
+        WNDCLASSEXA wc = { sizeof(WNDCLASSEXA) };
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = GetModuleHandleA(NULL);
+        wc.lpszClassName = "VR_DLSS5_OSD_WindowClass";
+        RegisterClassExA(&wc);
+        s_classRegistered = true;
+    }
+
+    // 2. Créer la fenêtre layered transparente si nécessaire
+    if (!g_hOSDWnd) {
+        g_hOSDWnd = CreateWindowExA(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            "VR_DLSS5_OSD_WindowClass", "VR_DLSS5_HUD_OSD",
+            WS_POPUP,
+            0, 0, 100, 100,
+            NULL, NULL, GetModuleHandleA(NULL), NULL);
+        if (!g_hOSDWnd) return;
+    }
+
+    // 3. Déterminer les dimensions actuelles selon l'échelle (1.0x, 1.5x, 2.0x)
+    int scaleNum = 1, scaleDen = 1;
+    if (g_hudScale == 1) { scaleNum = 3; scaleDen = 2; }
+    else if (g_hudScale == 2) { scaleNum = 2; scaleDen = 1; }
+    int curW = (HUD_WIDTH * scaleNum) / scaleDen;
+    int curH = (HUD_HEIGHT * scaleNum) / scaleDen;
+
+    // 4. Allouer ou réallouer le DIBSection si l'échelle a changé
+    if (!g_hOSDDC || !g_hOSDBmp || g_currentOSDScale != g_hudScale) {
+        if (g_hOSDBmp) { DeleteObject(g_hOSDBmp); g_hOSDBmp = NULL; }
+        if (g_hOSDDC) { DeleteDC(g_hOSDDC); g_hOSDDC = NULL; }
+
+        HDC hdcScreen = GetDC(NULL);
+        g_hOSDDC = CreateCompatibleDC(hdcScreen);
+
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = curW;
+        bmi.bmiHeader.biHeight = -curH; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        g_hOSDBmp = CreateDIBSection(g_hOSDDC, &bmi, DIB_RGB_COLORS, (void**)&g_pOSDBits, NULL, 0);
+        SelectObject(g_hOSDDC, g_hOSDBmp);
+        ReleaseDC(NULL, hdcScreen);
+        g_currentOSDScale = g_hudScale;
+    }
+
+    if (!g_pOSDBits) return;
+
+    // 5. Dessiner le HUD dans s_hudPixels
+    RenderHUD(g_masterEnable, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_activeRow, g_hudPosIndex, g_liveHz);
+
+    // 6. Transférer avec alpha prémultiplié pour UpdateLayeredWindow
+    for (int y = 0; y < curH; y++) {
+        int srcY = (y * scaleDen) / scaleNum;
+        if (srcY >= HUD_HEIGHT) srcY = HUD_HEIGHT - 1;
+        uint32_t* pDstRow = g_pOSDBits + y * curW;
+        for (int x = 0; x < curW; x++) {
+            int srcX = (x * scaleDen) / scaleNum;
+            if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
+            HUDColor c = s_hudPixels[srcY][srcX];
+            uint32_t a = c.a;
+            uint32_t r = (c.r * a) / 255;
+            uint32_t g = (c.g * a) / 255;
+            uint32_t b = (c.b * a) / 255;
+            pDstRow[x] = (a << 24) | (r << 16) | (g << 8) | b;
+        }
+    }
+
+    // 7. Calculer la position sur la fenêtre active du jeu ou l'écran principal
+    HWND hTarget = GetForegroundWindow();
+    RECT rc = {};
+    if (!hTarget || !GetWindowRect(hTarget, &rc) || (rc.right - rc.left < 400)) {
+        rc.left = 0; rc.top = 0;
+        rc.right = GetSystemMetrics(SM_CXSCREEN);
+        rc.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    int winW = rc.right - rc.left;
+    int winH = rc.bottom - rc.top;
+
+    int dstX = rc.left + (winW - curW) / 2;
+    int dstY = rc.top + winH - curH - 80;
+
+    switch (g_hudPosIndex % 4) {
+    case 0: // Bas-Centre
+        dstX = rc.left + (winW - curW) / 2;
+        dstY = rc.top + winH - curH - 80;
+        break;
+    case 1: // Haut-Centre
+        dstX = rc.left + (winW - curW) / 2;
+        dstY = rc.top + 60;
+        break;
+    case 2: // Haut-Droite
+        dstX = rc.left + winW - curW - 80;
+        dstY = rc.top + 60;
+        break;
+    case 3: // Haut-Gauche
+        dstX = rc.left + 80;
+        dstY = rc.top + 60;
+        break;
+    }
+
+    HDC hdcScreen = GetDC(NULL);
+    POINT ptDst = { dstX, dstY };
+    SIZE szDst = { curW, curH };
+    POINT ptSrc = { 0, 0 };
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_hOSDWnd, hdcScreen, &ptDst, &szDst, g_hOSDDC, &ptSrc, 0, &bf, ULW_ALPHA);
+    ReleaseDC(NULL, hdcScreen);
+
+    if (!IsWindowVisible(g_hOSDWnd)) {
+        ShowWindow(g_hOSDWnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Autonomous Input Watcher Thread (100% Découplé, Zero Crash, 0 ms RAM Sync)
+// ----------------------------------------------------------------------------
+static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
+{
+    LogMsg("[Proxy] Input Watcher Thread started.");
+
+    // Attendre que le jeu et les modules s'initialisent
+    for (int i = 0; i < 30; i++) {
+        Sleep(100);
+        if (!g_renodxBase) {
+            g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
+            if (g_renodxBase) {
+                LogMsg("[Proxy] Discovered renodx-dlss5.addon64 in memory!");
+            }
+        }
+    }
+
+    HDC hdc = GetDC(NULL);
+    if (hdc) {
+        int vRef = GetDeviceCaps(hdc, VREFRESH);
+        ReleaseDC(NULL, hdc);
+        if (vRef >= 60 && vRef <= 240) g_liveHz = vRef;
+    }
+
+    LogMsg("[Proxy] Input Watcher Thread ready: polling F6 and Select+L3...");
+
+    while (true)
+    {
+        uint64_t now = GetTickCount64();
+
+        // 1. Initialiser paresseusement les variables au premier lancement
+        InitVariablesFromAddonOrIni();
+
+        // 2. Écouter les entrées clavier (F6) et manettes (Select+L3)
+        PollInput();
+
+        // 3. Mettre à jour la fenêtre OSD flottante transparente
+        UpdateOSDWindow(g_hudVisible);
+
+        // 4. Persistence différée (500 ms debounce sans micro-stutter)
+        if (g_hasPendingSave && (now - g_lastChangeTick >= 500))
+        {
+            g_hasPendingSave = false;
+            CommitSettingsToDisk();
+        }
+
+        Sleep(16); // ~60 Hz
+    }
+    return 0;
 }
 
 // ----------------------------------------------------------------------------
