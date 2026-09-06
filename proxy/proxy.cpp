@@ -221,11 +221,11 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, vo
 } // extern "C"
 
 // ============================================================================
-// VR-DLSS 5 HUD & REAL-TIME CONTROLLER
+// VR-DLSS 5 HUD & REAL-TIME CONTROLLER (Quest 3 & Pimax Multi-Res)
 // ============================================================================
 
 #define HUD_WIDTH 384
-#define HUD_HEIGHT 130
+#define HUD_HEIGHT 144
 
 struct HUDColor {
     uint8_t r, g, b, a;
@@ -245,8 +245,10 @@ static bool g_masterEnable = true;
 static float g_nrIntensity = 2.50f;
 static float g_nrGlobalTone = 1.00f;
 static int g_nrPreset = 0;
-static int g_activeRow = 0;
+static int g_hudScale = 1; // 0: 1.0x (Compact / Pimax), 1: 1.5x (Balanced / Quest 3 Default), 2: 2.0x (Comfort / Quest 3)
+static int g_activeRow = 0; // 0 to 4
 static int g_hudPosIndex = 0; // 0: Bottom-Center (Default), 1: Top-Center, 2: Top-Right, 3: Top-Left
+static int g_liveHz = 72;
 
 // 500 ms Debounce State
 static bool g_hasPendingSave = false;
@@ -303,11 +305,18 @@ static void InitVariablesFromAddonOrIni()
         if (g_nrGlobalTone <= 0.0f || g_nrGlobalTone > 5.0f) g_nrGlobalTone = 1.00f;
         if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 0;
 
+        // Load scale & position from INI (default: 1.5x for Quest 3 comfort)
+        g_hudScale = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDScale", 1, g_iniPath);
+        if (g_hudScale < 0 || g_hudScale > 2) g_hudScale = 1;
+
+        g_hudPosIndex = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDPosition", 0, g_iniPath);
+        if (g_hudPosIndex < 0 || g_hudPosIndex > 3) g_hudPosIndex = 0;
+
         g_varsInitialized = true;
         char buf[256];
         sprintf_s(buf, sizeof(buf), 
-            "[VR-DLSS5-HUD] Initialized from RenoDX RAM: Enable=%d, Intensity=%.2f, Tone=%.2f, Preset=%d",
-            g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset);
+            "[VR-DLSS5-HUD] Initialized: Enable=%d, Intensity=%.2f, Tone=%.2f, Preset=%d, Scale=%d, Pos=%d",
+            g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_hudPosIndex);
         LogMsg(buf);
     }
 }
@@ -327,10 +336,16 @@ static void CommitSettingsToDisk()
     sprintf_s(valStr, sizeof(valStr), "%d", g_nrPreset);
     WritePrivateProfileStringA("RenoDX.DLSS5", "NRPreset", valStr, g_iniPath);
 
+    sprintf_s(valStr, sizeof(valStr), "%d", g_hudScale);
+    WritePrivateProfileStringA("RenoDX.DLSS5", "HUDScale", valStr, g_iniPath);
+
+    sprintf_s(valStr, sizeof(valStr), "%d", g_hudPosIndex);
+    WritePrivateProfileStringA("RenoDX.DLSS5", "HUDPosition", valStr, g_iniPath);
+
     char logBuf[256];
     sprintf_s(logBuf, sizeof(logBuf), 
-        "[VR-DLSS5-HUD] 500ms Debounce Save committed: Enable=%d, Intensity=%.2f, Tone=%.2f, Preset=%d -> %s",
-        g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_iniPath);
+        "[VR-DLSS5-HUD] 500ms Debounce Save committed: Enable=%d, Int=%.2f, Tone=%.2f, Preset=%d, Scale=%d -> %s",
+        g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_iniPath);
     LogMsg(logBuf);
 }
 
@@ -413,11 +428,11 @@ static void HUD_DrawSlider(int x, int y, int w, int h, float valNorm, HUDColor f
     HUD_FillRect(thumbX - 1, y - 1, 3, h + 2, thumbColor);
 }
 
-static void RenderHUD(bool masterEnable, float intensity, float tone, int preset, int activeRow, int posIdx)
+static void RenderHUD(bool masterEnable, float intensity, float tone, int preset, int scaleMode, int activeRow, int posIdx, int liveHz)
 {
-    // Background: Dark slate/navy semi-opaque
+    // Dark slate background
     HUD_Clear(MakeHUDColor(14, 18, 26, 245));
-    // Outer border: Cyan neon
+    // Cyan neon border
     HUD_DrawRect(0, 0, HUD_WIDTH, HUD_HEIGHT, MakeHUDColor(0, 180, 230, 255));
     HUD_DrawRect(1, 1, HUD_WIDTH - 2, HUD_HEIGHT - 2, MakeHUDColor(20, 40, 60, 200));
 
@@ -427,11 +442,13 @@ static void RenderHUD(bool masterEnable, float intensity, float tone, int preset
     sprintf_s(titleBuf, sizeof(titleBuf), "DLSS 5 NEURAL RECON [%s]", posNames[posIdx & 3]);
     HUD_DrawText(10, 5, titleBuf, MakeHUDColor(0, 220, 255, 255));
 
-    // Eval Status badge
+    // Dynamic Live Hz status badge (72Hz, 80Hz, 90Hz, 120Hz)
+    char badgeBuf[32];
     if (masterEnable) {
+        sprintf_s(badgeBuf, sizeof(badgeBuf), "%dHz ON", liveHz);
         HUD_FillRect(HUD_WIDTH - 65, 4, 55, 14, MakeHUDColor(20, 120, 50, 255));
         HUD_DrawRect(HUD_WIDTH - 65, 4, 55, 14, MakeHUDColor(80, 255, 120, 255));
-        HUD_DrawText(HUD_WIDTH - 57, 5, "72Hz ON", MakeHUDColor(255, 255, 255, 255));
+        HUD_DrawText(HUD_WIDTH - 57, 5, badgeBuf, MakeHUDColor(255, 255, 255, 255));
     } else {
         HUD_FillRect(HUD_WIDTH - 65, 4, 55, 14, MakeHUDColor(120, 30, 30, 255));
         HUD_DrawRect(HUD_WIDTH - 65, 4, 55, 14, MakeHUDColor(255, 80, 80, 255));
@@ -439,14 +456,14 @@ static void RenderHUD(bool masterEnable, float intensity, float tone, int preset
     }
 
     // Separator line
-    HUD_FillRect(8, 20, HUD_WIDTH - 16, 1, MakeHUDColor(40, 70, 100, 255));
+    HUD_FillRect(8, 19, HUD_WIDTH - 16, 1, MakeHUDColor(40, 70, 100, 255));
 
-    // Row positions
-    int rowY[4] = { 24, 46, 68, 90 };
-    for (int i = 0; i < 4; i++) {
+    // 5 Rows
+    int rowY[5] = { 22, 42, 62, 82, 102 };
+    for (int i = 0; i < 5; i++) {
         if (i == activeRow) {
-            HUD_FillRect(6, rowY[i] - 2, HUD_WIDTH - 12, 19, MakeHUDColor(25, 45, 75, 255));
-            HUD_DrawRect(6, rowY[i] - 2, HUD_WIDTH - 12, 19, MakeHUDColor(0, 180, 255, 200));
+            HUD_FillRect(6, rowY[i] - 1, HUD_WIDTH - 12, 17, MakeHUDColor(25, 45, 75, 255));
+            HUD_DrawRect(6, rowY[i] - 1, HUD_WIDTH - 12, 17, MakeHUDColor(0, 180, 255, 200));
             HUD_DrawText(10, rowY[i] + 1, ">", MakeHUDColor(255, 255, 0, 255));
         } else {
             HUD_DrawText(10, rowY[i] + 1, " ", MakeHUDColor(100, 120, 140, 255));
@@ -485,8 +502,15 @@ static void RenderHUD(bool masterEnable, float intensity, float tone, int preset
     sprintf_s(preBuf, sizeof(preBuf), "AI Preset   : %s", presetNames[preset % 3]);
     HUD_DrawText(22, rowY[3] + 1, preBuf, activeRow == 3 ? MakeHUDColor(255, 255, 100) : MakeHUDColor(190, 200, 210));
 
+    // ROW 4: UI Scale Mode (Quest 3 & Pimax)
+    const char* scaleNames[3] = { "1.0x [Compact/Pimax]", "1.5x [Balanced/Quest3]", "2.0x [Comfort/Quest3]" };
+    char scaleBuf[64];
+    sprintf_s(scaleBuf, sizeof(scaleBuf), "UI Scale    : %s", scaleNames[scaleMode % 3]);
+    HUD_DrawText(22, rowY[4] + 1, scaleBuf, activeRow == 4 ? MakeHUDColor(255, 255, 100) : MakeHUDColor(190, 200, 210));
+
     // Footer Help Bar
-    HUD_FillRect(6, 112, HUD_WIDTH - 12, 1, MakeHUDColor(35, 60, 90, 255));
+    HUD_FillRect(6, 122, HUD_WIDTH - 12, 1, MakeHUDColor(35, 60, 90, 255));
+    HUD_DrawText(10, 126, "^v:Row <>:Adj A:Tgl Y:Pos R3/F7:Scale F6:Off", MakeHUDColor(120, 160, 190, 255));
 }
 
 
@@ -585,16 +609,28 @@ static bool EnsureUploadBuffer(ID3D12Device* pDev, UINT64 requiredSize)
     return true;
 }
 
-static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch)
+static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch, int scaleMode)
 {
     if (!g_pMappedData) return false;
 
-    for (int y = 0; y < HUD_HEIGHT; y++) {
+    int scaleNum = 1, scaleDen = 1;
+    if (scaleMode == 1) { scaleNum = 3; scaleDen = 2; }      // 1.5x (Balanced / Quest 3)
+    else if (scaleMode == 2) { scaleNum = 2; scaleDen = 1; } // 2.0x (Comfort / Large)
+
+    int curW = (HUD_WIDTH * scaleNum) / scaleDen;
+    int curH = (HUD_HEIGHT * scaleNum) / scaleDen;
+
+    for (int y = 0; y < curH; y++) {
+        int srcY = (y * scaleDen) / scaleNum;
+        if (srcY >= HUD_HEIGHT) srcY = HUD_HEIGHT - 1;
+
         uint8_t* pRow = (uint8_t*)g_pMappedData + y * rowPitch;
 
         if (format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
-            for (int x = 0; x < HUD_WIDTH; x++) {
-                HUDColor c = s_hudPixels[y][x];
+            for (int x = 0; x < curW; x++) {
+                int srcX = (x * scaleDen) / scaleNum;
+                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
+                HUDColor c = s_hudPixels[srcY][srcX];
                 pRow[x * 4 + 0] = c.r;
                 pRow[x * 4 + 1] = c.g;
                 pRow[x * 4 + 2] = c.b;
@@ -602,8 +638,10 @@ static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch)
             }
         }
         else if (format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
-            for (int x = 0; x < HUD_WIDTH; x++) {
-                HUDColor c = s_hudPixels[y][x];
+            for (int x = 0; x < curW; x++) {
+                int srcX = (x * scaleDen) / scaleNum;
+                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
+                HUDColor c = s_hudPixels[srcY][srcX];
                 pRow[x * 4 + 0] = c.b;
                 pRow[x * 4 + 1] = c.g;
                 pRow[x * 4 + 2] = c.r;
@@ -612,8 +650,10 @@ static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch)
         }
         else if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
             uint16_t* pRow16 = (uint16_t*)pRow;
-            for (int x = 0; x < HUD_WIDTH; x++) {
-                HUDColor c = s_hudPixels[y][x];
+            for (int x = 0; x < curW; x++) {
+                int srcX = (x * scaleDen) / scaleNum;
+                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
+                HUDColor c = s_hudPixels[srcY][srcX];
                 pRow16[x * 4 + 0] = FloatToHalf((float)c.r / 255.0f);
                 pRow16[x * 4 + 1] = FloatToHalf((float)c.g / 255.0f);
                 pRow16[x * 4 + 2] = FloatToHalf((float)c.b / 255.0f);
@@ -622,8 +662,10 @@ static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch)
         }
         else if (format == DXGI_FORMAT_R10G10B10A2_UNORM) {
             uint32_t* pRow32 = (uint32_t*)pRow;
-            for (int x = 0; x < HUD_WIDTH; x++) {
-                HUDColor c = s_hudPixels[y][x];
+            for (int x = 0; x < curW; x++) {
+                int srcX = (x * scaleDen) / scaleNum;
+                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
+                HUDColor c = s_hudPixels[srcY][srcX];
                 uint32_t r10 = (uint32_t)c.r * 1023 / 255;
                 uint32_t g10 = (uint32_t)c.g * 1023 / 255;
                 uint32_t b10 = (uint32_t)c.b * 1023 / 255;
@@ -633,8 +675,10 @@ static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch)
         }
         else if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
             uint32_t* pRow32 = (uint32_t*)pRow;
-            for (int x = 0; x < HUD_WIDTH; x++) {
-                HUDColor c = s_hudPixels[y][x];
+            for (int x = 0; x < curW; x++) {
+                int srcX = (x * scaleDen) / scaleNum;
+                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
+                HUDColor c = s_hudPixels[srcY][srcX];
                 uint32_t r11 = FloatToR11((float)c.r / 255.0f);
                 uint32_t g11 = FloatToR11((float)c.g / 255.0f);
                 uint32_t b10 = FloatToR10((float)c.b / 255.0f);
@@ -728,6 +772,7 @@ static void PollInput()
 
     // 2. Active HUD Controls
     UpdateKey(VK_TAB, now);
+    UpdateKey(VK_F7, now);
     UpdateKey(VK_ESCAPE, now);
     UpdateKey(VK_UP, now);
     UpdateKey(VK_DOWN, now);
@@ -736,6 +781,7 @@ static void PollInput()
     UpdateKey(VK_SPACE, now);
     UpdateKey(VK_RETURN, now);
 
+    // Close HUD
     static bool s_prevPadB = false;
     bool padB = (buttons & XINPUT_GAMEPAD_B) != 0;
     if (g_keys[VK_ESCAPE].justPressed || (padB && !s_prevPadB)) {
@@ -745,6 +791,7 @@ static void PollInput()
     }
     s_prevPadB = padB;
 
+    // Cycle Position: Tab or Gamepad Y
     static bool s_prevPadY = false;
     bool padY = (buttons & XINPUT_GAMEPAD_Y) != 0;
     if (g_keys[VK_TAB].justPressed || (padY && !s_prevPadY)) {
@@ -753,19 +800,36 @@ static void PollInput()
         char buf[128];
         sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] Position changed to: %s", posNames[g_hudPosIndex]);
         LogMsg(buf);
+        g_hasPendingSave = true;
+        g_lastChangeTick = now;
     }
     s_prevPadY = padY;
 
+    // Direct Scale Toggle: F7 (Keyboard) or R3 (Right Stick Click)
+    static bool s_prevPadR3 = false;
+    bool padR3 = (buttons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
+    if (g_keys[VK_F7].justPressed || (padR3 && !s_prevPadR3)) {
+        g_hudScale = (g_hudScale + 1) % 3;
+        static const char* scaleNames[] = { "1.0x (Compact)", "1.5x (Balanced Q3)", "2.0x (Comfort Q3)" };
+        char buf[128];
+        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] Scale toggled to: %s", scaleNames[g_hudScale]);
+        LogMsg(buf);
+        g_hasPendingSave = true;
+        g_lastChangeTick = now;
+    }
+    s_prevPadR3 = padR3;
+
+    // Navigate Rows (5 rows: 0 to 4)
     static bool s_prevPadUp = false;
     static bool s_prevPadDown = false;
     bool padUp = (buttons & XINPUT_GAMEPAD_DPAD_UP) != 0;
     bool padDown = (buttons & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
 
     if (g_keys[VK_UP].justPressed || (padUp && !s_prevPadUp)) {
-        g_activeRow = (g_activeRow + 3) % 4;
+        g_activeRow = (g_activeRow + 4) % 5;
     }
     if (g_keys[VK_DOWN].justPressed || (padDown && !s_prevPadDown)) {
-        g_activeRow = (g_activeRow + 1) % 4;
+        g_activeRow = (g_activeRow + 1) % 5;
     }
     s_prevPadUp = padUp;
     s_prevPadDown = padDown;
@@ -847,6 +911,15 @@ static void PollInput()
             valueChanged = true;
         }
     }
+    else if (g_activeRow == 4) { // UI Scale (1.0x, 1.5x, 2.0x)
+        if (actionTrigger || actRight) {
+            g_hudScale = (g_hudScale + 1) % 3;
+            valueChanged = true;
+        } else if (actLeft) {
+            g_hudScale = (g_hudScale + 2) % 3;
+            valueChanged = true;
+        }
+    }
 
     // Real-time immediate RAM update & Arm 500ms debounce
     if (valueChanged) {
@@ -865,7 +938,7 @@ static void PollInput()
 }
 
 // ----------------------------------------------------------------------------
-// D3D12 In-Game VR & Desktop Overlay Blitter
+// D3D12 In-Game VR & Desktop Overlay Blitter (Pimax & Quest 3 Sweet-Spot)
 // ----------------------------------------------------------------------------
 static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParameters)
 {
@@ -889,22 +962,30 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
         HRESULT hr = pOutput->GetDevice(__uuidof(ID3D12Device), (void**)&pDevice);
         if (FAILED(hr) || !pDevice) return;
 
+        // Determine current width and height based on scale
+        int scaleNum = 1, scaleDen = 1;
+        if (g_hudScale == 1) { scaleNum = 3; scaleDen = 2; }      // 1.5x (Balanced / Quest 3 default)
+        else if (g_hudScale == 2) { scaleNum = 2; scaleDen = 1; } // 2.0x (Comfort / Large Quest 3)
+
+        UINT curW = (HUD_WIDTH * scaleNum) / scaleDen;
+        UINT curH = (HUD_HEIGHT * scaleNum) / scaleDen;
+
         UINT bytesPerPixel = 4;
         if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM) {
             bytesPerPixel = 8;
         }
 
-        UINT rowPitch = (HUD_WIDTH * bytesPerPixel + 255) & ~255;
-        UINT requiredSize = rowPitch * HUD_HEIGHT;
+        UINT rowPitch = (curW * bytesPerPixel + 255) & ~255;
+        UINT requiredSize = 2 * 1024 * 1024; // 2 MB buffer covers up to 2.0x scale in FP16
 
         if (!EnsureUploadBuffer(pDevice, requiredSize)) {
             pDevice->Release();
             return;
         }
 
-        RenderHUD(g_masterEnable, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_activeRow, g_hudPosIndex);
+        RenderHUD(g_masterEnable, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_activeRow, g_hudPosIndex, g_liveHz);
 
-        if (!WriteHUDToMappedData(desc.Format, rowPitch)) {
+        if (!WriteHUDToMappedData(desc.Format, rowPitch, g_hudScale)) {
             pDevice->Release();
             return;
         }
@@ -914,22 +995,31 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
         UINT dstX = 0;
         UINT dstY = 0;
 
+        // Proportional safety margins for VR lenses (Quest 3 Pancake & Pimax Fresnel):
+        // 10% horizontal margin and 12% vertical margin keep HUD perfectly within
+        // the circular optical sweet spot and clear of the nasal cutout / lens mask.
+        UINT marginX = (UINT)(texW * 0.10f);
+        if (marginX < 40) marginX = 40;
+
+        UINT marginY = (UINT)(texH * 0.12f);
+        if (marginY < 60) marginY = 60;
+
         switch (g_hudPosIndex % 4) {
         case 0: // Bottom-Center (Default)
-            dstX = (texW > HUD_WIDTH) ? (texW - HUD_WIDTH) / 2 : 0;
-            dstY = (texH > (HUD_HEIGHT + 140)) ? (texH - HUD_HEIGHT - 140) : 0;
+            dstX = (texW > curW) ? (texW - curW) / 2 : 0;
+            dstY = (texH > (curH + marginY)) ? (texH - curH - marginY) : 0;
             break;
         case 1: // Top-Center
-            dstX = (texW > HUD_WIDTH) ? (texW - HUD_WIDTH) / 2 : 0;
-            dstY = (texH > (HUD_HEIGHT + 140)) ? 140 : 0;
+            dstX = (texW > curW) ? (texW - curW) / 2 : 0;
+            dstY = (texH > (curH + marginY)) ? marginY : 0;
             break;
         case 2: // Top-Right (45 deg)
-            dstX = (texW > (HUD_WIDTH + 160)) ? (texW - HUD_WIDTH - 160) : 0;
-            dstY = (texH > (HUD_HEIGHT + 160)) ? 160 : 0;
+            dstX = (texW > (curW + marginX)) ? (texW - curW - marginX) : 0;
+            dstY = (texH > (curH + marginY)) ? marginY : 0;
             break;
         case 3: // Top-Left (45 deg)
-            dstX = (texW > (HUD_WIDTH + 160)) ? 160 : 0;
-            dstY = (texH > (HUD_HEIGHT + 160)) ? 160 : 0;
+            dstX = (texW > (curW + marginX)) ? marginX : 0;
+            dstY = (texH > (curH + marginY)) ? marginY : 0;
             break;
         }
 
@@ -952,12 +1042,12 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
         srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         srcLoc.PlacedFootprint.Offset = 0;
         srcLoc.PlacedFootprint.Footprint.Format = desc.Format;
-        srcLoc.PlacedFootprint.Footprint.Width = HUD_WIDTH;
-        srcLoc.PlacedFootprint.Footprint.Height = HUD_HEIGHT;
+        srcLoc.PlacedFootprint.Footprint.Width = curW;
+        srcLoc.PlacedFootprint.Footprint.Height = curH;
         srcLoc.PlacedFootprint.Footprint.Depth = 1;
         srcLoc.PlacedFootprint.Footprint.RowPitch = rowPitch;
 
-        D3D12_BOX box = { 0, 0, 0, HUD_WIDTH, HUD_HEIGHT, 1 };
+        D3D12_BOX box = { 0, 0, 0, curW, curH, 1 };
         pCmdList->CopyTextureRegion(&dstLoc, dstX, dstY, 0, &srcLoc, &box);
 
         barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -997,8 +1087,29 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, 
     // 2. Synchronisation de la mémoire et lecture paresseuse des variables
     InitVariablesFromAddonOrIni();
 
-    // 3. Polling utilisateur (Clavier + Manette)
+    // 3. Calcul dynamique du taux de rafraîchissement VR (72Hz, 80Hz, 90Hz, 120Hz)
     uint64_t now = GetTickCount64();
+    static uint64_t s_lastFrameTick = 0;
+    static float s_smoothedFps = 72.0f;
+    if (s_lastFrameTick > 0)
+    {
+        uint64_t delta = now - s_lastFrameTick;
+        if (delta > 0 && delta < 500)
+        {
+            float instantFps = 1000.0f / (float)delta;
+            s_smoothedFps = s_smoothedFps * 0.95f + instantFps * 0.05f;
+        }
+    }
+    s_lastFrameTick = now;
+
+    int displayHz = (int)(s_smoothedFps + 0.5f);
+    if (abs(displayHz - 72) <= 3) displayHz = 72;
+    else if (abs(displayHz - 80) <= 3) displayHz = 80;
+    else if (abs(displayHz - 90) <= 3) displayHz = 90;
+    else if (abs(displayHz - 120) <= 3) displayHz = 120;
+    g_liveHz = displayHz;
+
+    // 4. Polling utilisateur (Clavier + Manette)
     static uint64_t s_lastInputTick = 0;
     if (now - s_lastInputTick >= 8)
     {
@@ -1006,20 +1117,20 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, 
         PollInput();
     }
 
-    // 4. Persistence différée (500 ms debounce sans micro-stutter à 72 Hz)
+    // 5. Persistence différée (500 ms debounce sans micro-stutter)
     if (g_hasPendingSave && (now - g_lastChangeTick >= 500))
     {
         g_hasPendingSave = false;
         CommitSettingsToDisk();
     }
 
-    // 5. Rendu de l'overlay dans le casque VR et sur le miroir bureau
+    // 6. Rendu de l'overlay dans le casque VR et sur le miroir bureau
     if (g_hudVisible && pCmdList)
     {
         BlitHUDToOutput((ID3D12GraphicsCommandList*)pCmdList, pParameters);
     }
 
-    // 6. Télémétrie de synchronisation continue
+    // 7. Télémétrie de synchronisation continue
     if ((g_evalFrameCounter % 200) == 1 || g_evalFrameCounter <= 20)
     {
         char buf[256];
