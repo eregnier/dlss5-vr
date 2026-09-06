@@ -2,6 +2,9 @@
 *.exe
 *.exe~
 *.dll.tmp
+*.obj
+*.exp
+*.lib
 
 # Archives
 *.zip
