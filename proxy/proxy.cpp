@@ -764,11 +764,13 @@ static void PollInput()
 {
     uint64_t now = GetTickCount64();
 
-    // 1. Keyboard F6 & Gamepad Select + L3 Toggle
+    // 1. Keyboard F6 & Gamepad Select + L3 Toggle (avec cooldown 350ms anti-rebond)
+    static uint64_t s_lastToggleTick = 0;
     bool toggleRequested = false;
 
     UpdateKey(VK_F6, now);
-    if (g_keys[VK_F6].justPressed) {
+    if (g_keys[VK_F6].justPressed && (now - s_lastToggleTick >= 350)) {
+        s_lastToggleTick = now;
         toggleRequested = true;
     }
 
@@ -804,7 +806,8 @@ static void PollInput()
     bool comboDown = ((xButtons & 0x0060) == 0x0060) || 
                      ((dButtons & 0x0500) == 0x0500);
     static bool s_prevCombo = false;
-    if (comboDown && !s_prevCombo) {
+    if (comboDown && !s_prevCombo && (now - s_lastToggleTick >= 350)) {
+        s_lastToggleTick = now;
         toggleRequested = true;
     }
     s_prevCombo = comboDown;
@@ -832,16 +835,14 @@ static void PollInput()
     UpdateKey(VK_SPACE, now);
     UpdateKey(VK_RETURN, now);
 
-    // Close HUD: Escape / Gamepad B (Xbox B: 0x2000 / DualSense Circle: bit 2 = 0x0004)
-    static bool s_prevPadB = false;
-    bool padB = ((xButtons & XINPUT_GAMEPAD_B) != 0) || ((dButtons & 0x0004) != 0);
-    if (g_keys[VK_ESCAPE].justPressed || (padB && !s_prevPadB)) {
+    // Close HUD: Escape (Keyboard)
+    if (g_keys[VK_ESCAPE].justPressed) {
         g_hudVisible = false;
         g_hudDirty = true;
-        LogMsg("[VR-DLSS5-HUD] Overlay closed");
+        s_lastToggleTick = now;
+        LogMsg("[VR-DLSS5-HUD] Overlay closed via Escape");
         return;
     }
-    s_prevPadB = padB;
 
     // Cycle Position: Tab or Gamepad Y (Xbox Y: 0x8000 / DualSense Triangle: bit 3 = 0x0008)
     static bool s_prevPadY = false;
@@ -873,13 +874,13 @@ static void PollInput()
     }
     s_prevPadR3 = padR3;
 
-    // Navigate Rows (5 rows: 0 to 4)
+    // Navigate Rows (5 rows: 0 to 4) - PURE DIGITAL D-PAD (pas de parasitage par le stick analogique)
     static bool s_prevPadUp = false;
     static bool s_prevPadDown = false;
     bool padUp = ((xButtons & XINPUT_GAMEPAD_DPAD_UP) != 0) || 
-                 (dinputConnected && ((jie.dwPOV == 0 || jie.dwPOV == 31500 || jie.dwPOV == 4500) || jie.dwYpos < 16000));
+                 (dinputConnected && (jie.dwPOV == 0 || jie.dwPOV == 31500 || jie.dwPOV == 4500));
     bool padDown = ((xButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0) || 
-                   (dinputConnected && ((jie.dwPOV == 18000 || jie.dwPOV == 13500 || jie.dwPOV == 22500) || jie.dwYpos > 48000));
+                   (dinputConnected && (jie.dwPOV == 18000 || jie.dwPOV == 13500 || jie.dwPOV == 22500));
 
     if (g_keys[VK_UP].justPressed || (padUp && !s_prevPadUp)) {
         g_activeRow = (g_activeRow + 4) % 5;
@@ -903,9 +904,9 @@ static void PollInput()
     static uint64_t s_padLeftSince = 0, s_padLeftRepeat = 0;
     static uint64_t s_padRightSince = 0, s_padRightRepeat = 0;
     bool padLeft = ((xButtons & XINPUT_GAMEPAD_DPAD_LEFT) != 0) || 
-                   (dinputConnected && ((jie.dwPOV == 27000 || jie.dwPOV == 22500 || jie.dwPOV == 31500) || jie.dwXpos < 16000));
+                   (dinputConnected && (jie.dwPOV == 27000 || jie.dwPOV == 22500 || jie.dwPOV == 31500));
     bool padRight = ((xButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0) || 
-                    (dinputConnected && ((jie.dwPOV == 9000 || jie.dwPOV == 4500 || jie.dwPOV == 13500) || jie.dwXpos > 48000));
+                    (dinputConnected && (jie.dwPOV == 9000 || jie.dwPOV == 4500 || jie.dwPOV == 13500));
 
     if (padLeft) {
         if (s_padLeftSince == 0) {
@@ -1102,36 +1103,31 @@ static void UpdateOSDWindow(bool visible)
         }
     }
 
-    // 7. Calculer la position sur la fenêtre active du jeu ou l'écran principal
-    HWND hTarget = GetForegroundWindow();
-    RECT rc = {};
-    if (!hTarget || !GetWindowRect(hTarget, &rc) || (rc.right - rc.left < 400)) {
-        rc.left = 0; rc.top = 0;
-        rc.right = GetSystemMetrics(SM_CXSCREEN);
-        rc.bottom = GetSystemMetrics(SM_CYSCREEN);
-    }
-    int winW = rc.right - rc.left;
-    int winH = rc.bottom - rc.top;
+    // 7. Calculer la position sur l'écran principal (garantit visibilité fixe et stable)
+    int scrW = GetSystemMetrics(SM_CXSCREEN);
+    int scrH = GetSystemMetrics(SM_CYSCREEN);
+    if (scrW <= 0) scrW = 1920;
+    if (scrH <= 0) scrH = 1080;
 
-    int dstX = rc.left + (winW - curW) / 2;
-    int dstY = rc.top + winH - curH - 80;
+    int dstX = (scrW - curW) / 2;
+    int dstY = scrH - curH - 80;
 
     switch (g_hudPosIndex % 4) {
     case 0: // Bas-Centre
-        dstX = rc.left + (winW - curW) / 2;
-        dstY = rc.top + winH - curH - 80;
+        dstX = (scrW - curW) / 2;
+        dstY = scrH - curH - 80;
         break;
     case 1: // Haut-Centre
-        dstX = rc.left + (winW - curW) / 2;
-        dstY = rc.top + 60;
+        dstX = (scrW - curW) / 2;
+        dstY = 60;
         break;
     case 2: // Haut-Droite
-        dstX = rc.left + winW - curW - 80;
-        dstY = rc.top + 60;
+        dstX = scrW - curW - 80;
+        dstY = 60;
         break;
     case 3: // Haut-Gauche
-        dstX = rc.left + 80;
-        dstY = rc.top + 60;
+        dstX = 80;
+        dstY = 60;
         break;
     }
 
@@ -1143,14 +1139,15 @@ static void UpdateOSDWindow(bool visible)
     UpdateLayeredWindow(g_hOSDWnd, hdcScreen, &ptDst, &szDst, g_hOSDDC, &ptSrc, 0, &bf, ULW_ALPHA);
     ReleaseDC(NULL, hdcScreen);
 
-    if (!IsWindowVisible(g_hOSDWnd)) {
-        ShowWindow(g_hOSDWnd, SW_SHOWNOACTIVATE);
-    }
+    // Maintenir en permanence au premier plan absolu au-dessus du jeu plein écran
+    SetWindowPos(g_hOSDWnd, HWND_TOPMOST, dstX, dstY, curW, curH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
 // ----------------------------------------------------------------------------
 // Autonomous Input Watcher Thread (100% Découplé, Zero Crash, 0 ms RAM Sync)
 // ----------------------------------------------------------------------------
+static void InstallVRBlitHook();
+
 static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
 {
     LogMsg("[Proxy] Input Watcher Thread started.");
@@ -1162,6 +1159,7 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
             g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
             if (g_renodxBase) {
                 LogMsg("[Proxy] Discovered renodx-dlss5.addon64 in memory!");
+                InstallVRBlitHook();
             }
         }
     }
@@ -1179,16 +1177,25 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
     {
         uint64_t now = GetTickCount64();
 
-        // 1. Initialiser paresseusement les variables au premier lancement
+        // 1. Découverte continue et armement du hook VR casque
+        if (!g_renodxBase) {
+            g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
+            if (g_renodxBase) {
+                LogMsg("[Proxy] Discovered renodx-dlss5.addon64 in memory!");
+                InstallVRBlitHook();
+            }
+        }
+
+        // 2. Initialiser paresseusement les variables au premier lancement
         InitVariablesFromAddonOrIni();
 
-        // 2. Écouter les entrées clavier (F6) et manettes (Select+L3)
+        // 3. Écouter les entrées clavier (F6) et manettes (Select+L3)
         PollInput();
 
-        // 3. Mettre à jour la fenêtre OSD flottante transparente
+        // 4. Mettre à jour la fenêtre OSD flottante transparente
         UpdateOSDWindow(g_hudVisible);
 
-        // 4. Persistence différée (500 ms debounce sans micro-stutter)
+        // 5. Persistence différée (500 ms debounce sans micro-stutter)
         if (g_hasPendingSave && (now - g_lastChangeTick >= 500))
         {
             g_hasPendingSave = false;
@@ -1332,6 +1339,97 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
             s_logged = true;
             LogMsg("[VR-DLSS5-HUD] EXCEPTION safely caught during HUD blit");
         }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// In-Headset VR Blit Hook for renodx-dlss5.addon64 (RVA 0x376C0)
+// Direct Injection into VR Eye Render Target ("Output") for Quest 3 / Pimax
+// ----------------------------------------------------------------------------
+typedef int (WINAPI *PFN_RenoDX_EvaluateFeature)(void* pCmdList, void* pHandle, void* pParameters, void* pCallback);
+static PFN_RenoDX_EvaluateFeature g_pfnTrampolineRenoDXEvaluate = NULL;
+static bool g_vrHookInstalled = false;
+
+static int WINAPI Hook_RenoDX_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
+{
+    // 1. Exécuter l'évaluation DLSS 5 RenoDX d'origine
+    int ret = 0;
+    if (g_pfnTrampolineRenoDXEvaluate)
+    {
+        ret = g_pfnTrampolineRenoDXEvaluate(pCmdList, pHandle, pParameters, pCallback);
+    }
+
+    // 2. Si le HUD est actif, blitter directement sur la texture VR ("Output")
+    if (g_hudVisible && pCmdList && pParameters)
+    {
+        BlitHUDToOutput((ID3D12GraphicsCommandList*)pCmdList, pParameters);
+    }
+
+    // 3. Télémétrie périodique (toutes les 3s quand le menu est ouvert)
+    static uint64_t s_lastVRBlitLog = 0;
+    uint64_t now = GetTickCount64();
+    if (g_hudVisible && (now - s_lastVRBlitLog >= 3000))
+    {
+        s_lastVRBlitLog = now;
+        char buf[128];
+        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] In-Headset VR Blit active (CmdList=%p, Params=%p)", pCmdList, pParameters);
+        LogMsg(buf);
+    }
+
+    return ret;
+}
+
+static void InstallVRBlitHook()
+{
+    if (g_vrHookInstalled || !g_renodxBase) return;
+
+    void* target = (void*)(g_renodxBase + 0x376C0);
+
+    // Vérifier les 8 premiers octets du prologue pour certifier l'adresse
+    const uint8_t expectedPrefix[8] = { 0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41 };
+    if (memcmp(target, expectedPrefix, sizeof(expectedPrefix)) != 0)
+    {
+        LogMsg("[Proxy] WARNING: renodx EvaluateFeature prefix mismatch, skipping hook");
+        return;
+    }
+
+    // Allouer la mémoire exécutable pour le trampoline
+    uint8_t* tramp = (uint8_t*)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp)
+    {
+        LogMsg("[Proxy] ERROR: Failed to allocate trampoline memory for VR hook");
+        return;
+    }
+
+    // Copier les 19 octets d'origine
+    memcpy(tramp, target, 19);
+
+    // Écrire le saut absolu vers target + 19
+    uintptr_t returnAddr = (uintptr_t)target + 19;
+    tramp[19] = 0xFF;
+    tramp[20] = 0x25; // jmp qword ptr [rip + 0]
+    *(int32_t*)(tramp + 21) = 0;
+    *(uintptr_t*)(tramp + 25) = returnAddr;
+
+    g_pfnTrampolineRenoDXEvaluate = (PFN_RenoDX_EvaluateFeature)tramp;
+
+    // Patcher l'entrée : saut absolu vers Hook_RenoDX_EvaluateFeature + 5 NOPs = 19 octets
+    DWORD oldProtect = 0;
+    if (VirtualProtect(target, 19, PAGE_EXECUTE_READWRITE, &oldProtect))
+    {
+        uint8_t patch[19];
+        patch[0] = 0xFF;
+        patch[1] = 0x25;
+        *(int32_t*)(patch + 2) = 0;
+        *(uintptr_t*)(patch + 6) = (uintptr_t)Hook_RenoDX_EvaluateFeature;
+        memset(patch + 14, 0x90, 5); // NOPs
+
+        memcpy(target, patch, 19);
+        VirtualProtect(target, 19, oldProtect, &oldProtect);
+        FlushInstructionCache(GetCurrentProcess(), target, 19);
+
+        g_vrHookInstalled = true;
+        LogMsg("[Proxy] SUCCESS: In-Headset VR Blit Hook installed into renodx-dlss5.addon64 (RVA 0x376C0)!");
     }
 }
 
