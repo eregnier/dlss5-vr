@@ -325,12 +325,17 @@ static void InitVariablesFromAddonOrIni()
 
     if (g_renodxBase)
     {
-        g_masterEnable = (*(uint8_t*)(g_renodxBase + 0x192F68)) != 0;
         g_nrIntensity = *(float*)(g_renodxBase + 0x19364C);
         g_nrGlobalTone = *(float*)(g_renodxBase + 0x193650);
         g_nrPreset = *(int32_t*)(g_renodxBase + 0x196B98);
 
-        if (g_nrIntensity <= 0.0f || g_nrIntensity > 10.0f) g_nrIntensity = 2.50f;
+        if (g_nrIntensity <= 0.01f) {
+            g_masterEnable = false;
+            g_nrIntensity = 2.00f;
+        } else {
+            g_masterEnable = true;
+            if (g_nrIntensity > 10.0f) g_nrIntensity = 2.50f;
+        }
         if (g_nrGlobalTone <= 0.0f || g_nrGlobalTone > 5.0f) g_nrGlobalTone = 1.00f;
         if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 0;
 
@@ -353,10 +358,10 @@ static void InitVariablesFromAddonOrIni()
 static void CommitSettingsToDisk()
 {
     char valStr[64];
-    sprintf_s(valStr, sizeof(valStr), "%d", g_masterEnable ? 1 : 0);
-    WritePrivateProfileStringA("RenoDX.DLSS5", "EnableHooks", valStr, g_iniPath);
+    WritePrivateProfileStringA("RenoDX.DLSS5", "EnableHooks", "1", g_iniPath);
 
-    sprintf_s(valStr, sizeof(valStr), "%.2f", g_nrIntensity);
+    float effectiveIntensity = g_masterEnable ? g_nrIntensity : 0.0f;
+    sprintf_s(valStr, sizeof(valStr), "%.2f", effectiveIntensity);
     WritePrivateProfileStringA("RenoDX.DLSS5", "NRIntensity", valStr, g_iniPath);
 
     sprintf_s(valStr, sizeof(valStr), "%.2f", g_nrGlobalTone);
@@ -374,7 +379,7 @@ static void CommitSettingsToDisk()
     char logBuf[256];
     sprintf_s(logBuf, sizeof(logBuf), 
         "[VR-DLSS5-HUD] 500ms Debounce Save committed: Enable=%d, Int=%.2f, Tone=%.2f, Preset=%d, Scale=%d -> %s",
-        g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_iniPath);
+        g_masterEnable ? 1 : 0, effectiveIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_iniPath);
     LogMsg(logBuf);
 }
 
@@ -583,11 +588,10 @@ static inline uint32_t FloatToR10(float f)
 static ID3D12Resource* g_pUploadBuffer = NULL;
 static ID3D12Device* g_pDevice = NULL;
 static void* g_pMappedData = NULL;
-static UINT64 g_uploadBufferSize = 0;
 
 static bool EnsureUploadBuffer(ID3D12Device* pDev, UINT64 requiredSize)
 {
-    if (g_pUploadBuffer && g_pDevice == pDev && g_uploadBufferSize >= requiredSize) {
+    if (g_pUploadBuffer && g_pDevice == pDev) {
         return true;
     }
     if (g_pUploadBuffer) {
@@ -595,7 +599,6 @@ static bool EnsureUploadBuffer(ID3D12Device* pDev, UINT64 requiredSize)
         g_pUploadBuffer->Release();
         g_pUploadBuffer = NULL;
         g_pMappedData = NULL;
-        g_uploadBufferSize = 0;
     }
     g_pDevice = pDev;
 
@@ -636,14 +639,20 @@ static bool EnsureUploadBuffer(ID3D12Device* pDev, UINT64 requiredSize)
         return false;
     }
 
-    g_uploadBufferSize = requiredSize;
     LogMsg("[VR-DLSS5-HUD] Staging upload buffer armed successfully");
     return true;
 }
 
-static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch, int curW, int curH, int scaleNum, int scaleDen)
+static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch, int scaleMode)
 {
     if (!g_pMappedData) return false;
+
+    int scaleNum = 1, scaleDen = 1;
+    if (scaleMode == 1) { scaleNum = 3; scaleDen = 2; }      // 1.5x (Balanced / Quest 3)
+    else if (scaleMode == 2) { scaleNum = 2; scaleDen = 1; } // 2.0x (Comfort / Large)
+
+    int curW = (HUD_WIDTH * scaleNum) / scaleDen;
+    int curH = (HUD_HEIGHT * scaleNum) / scaleDen;
 
     for (int y = 0; y < curH; y++) {
         int srcY = (y * scaleDen) / scaleNum;
@@ -683,18 +692,6 @@ static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch, int curW, in
                 pRow16[x * 4 + 1] = FloatToHalf((float)c.g / 255.0f);
                 pRow16[x * 4 + 2] = FloatToHalf((float)c.b / 255.0f);
                 pRow16[x * 4 + 3] = FloatToHalf((float)c.a / 255.0f);
-            }
-        }
-        else if (format == DXGI_FORMAT_R16G16B16A16_UNORM) {
-            uint16_t* pRow16 = (uint16_t*)pRow;
-            for (int x = 0; x < curW; x++) {
-                int srcX = (x * scaleDen) / scaleNum;
-                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
-                HUDColor c = s_hudPixels[srcY][srcX];
-                pRow16[x * 4 + 0] = (uint16_t)((c.r * 65535) / 255);
-                pRow16[x * 4 + 1] = (uint16_t)((c.g * 65535) / 255);
-                pRow16[x * 4 + 2] = (uint16_t)((c.b * 65535) / 255);
-                pRow16[x * 4 + 3] = (uint16_t)((c.a * 65535) / 255);
             }
         }
         else if (format == DXGI_FORMAT_R10G10B10A2_UNORM) {
@@ -1001,7 +998,7 @@ static void PollInput()
         }
         if (g_renodxBase) {
             *(uint8_t*)(g_renodxBase + 0x192F68) = g_masterEnable ? 1 : 0;
-            *(float*)(g_renodxBase + 0x19364C) = g_nrIntensity;
+            *(float*)(g_renodxBase + 0x19364C) = g_masterEnable ? g_nrIntensity : 0.0f;
             *(float*)(g_renodxBase + 0x193650) = g_nrGlobalTone;
             *(int32_t*)(g_renodxBase + 0x196B98) = g_nrPreset;
             *(int32_t*)(g_renodxBase + 0x196C2C) = g_nrPreset;
@@ -1243,12 +1240,10 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
         HRESULT hr = pOutput->GetDevice(__uuidof(ID3D12Device), (void**)&pDevice);
         if (FAILED(hr) || !pDevice) return;
 
-        // Determine current width and height based on scale and VR multiplier
-        int vrMult = (desc.Width >= 3000) ? 2 : 1;
+        // Determine current width and height based on scale
         int scaleNum = 1, scaleDen = 1;
         if (g_hudScale == 1) { scaleNum = 3; scaleDen = 2; }      // 1.5x (Balanced / Quest 3 default)
-        else if (g_hudScale == 2) { scaleNum = 2; scaleDen = 1; } // 2.0x (Comfort / Quest 3 large)
-        scaleNum *= vrMult;
+        else if (g_hudScale == 2) { scaleNum = 2; scaleDen = 1; } // 2.0x (Comfort / Large Quest 3)
 
         UINT curW = (HUD_WIDTH * scaleNum) / scaleDen;
         UINT curH = (HUD_HEIGHT * scaleNum) / scaleDen;
@@ -1259,7 +1254,7 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
         }
 
         UINT rowPitch = (curW * bytesPerPixel + 255) & ~255;
-        UINT requiredSize = 8 * 1024 * 1024; // 8 MB buffer covers up to 4.0x scale in FP16
+        UINT requiredSize = 2 * 1024 * 1024; // 2 MB buffer covers up to 2.0x scale in FP16
 
         if (!EnsureUploadBuffer(pDevice, requiredSize)) {
             pDevice->Release();
@@ -1268,7 +1263,7 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
 
         RenderHUD(g_masterEnable, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_activeRow, g_hudPosIndex, g_liveHz);
 
-        if (!WriteHUDToMappedData(desc.Format, rowPitch, curW, curH, scaleNum, scaleDen)) {
+        if (!WriteHUDToMappedData(desc.Format, rowPitch, g_hudScale)) {
             pDevice->Release();
             return;
         }
@@ -1278,62 +1273,32 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
         UINT dstX = 0;
         UINT dstY = 0;
 
-        if (vrMult == 2) {
-            // Quest 3 / Pimax VR Lens Optical Sweet-Spot Placement
-            // texW/2, texH/2 is center of VR gaze.
-            switch (g_hudPosIndex % 4) {
-            case 0: // Bottom-Center (Natural 58% downward gaze - Chest/Dashboard sweet spot)
-                dstX = (texW > curW) ? (texW - curW) / 2 : 0;
-                dstY = (texH * 58) / 100;
-                if (dstY + curH > texH - 40) dstY = texH - curH - 40;
-                break;
-            case 1: // Top-Center (Subtle 22% upward visor glance)
-                dstX = (texW > curW) ? (texW - curW) / 2 : 0;
-                dstY = (texH * 22) / 100;
-                break;
-            case 2: // Top-Right (Upper right peripheral glance)
-                dstX = (texW > (curW + (texW * 15) / 100)) ? (texW - curW - (texW * 15) / 100) : (texW - curW);
-                dstY = (texH * 22) / 100;
-                break;
-            case 3: // Top-Left (Upper left peripheral glance)
-                dstX = (texW * 15) / 100;
-                dstY = (texH * 22) / 100;
-                break;
-            }
-        } else {
-            // Desktop Flat Placement
-            UINT marginX = (UINT)(texW * 0.05f);
-            UINT marginY = (UINT)(texH * 0.08f);
-            if (marginX < 40) marginX = 40;
-            if (marginY < 40) marginY = 40;
+        // Proportional safety margins for VR lenses (Quest 3 Pancake & Pimax Fresnel):
+        // 10% horizontal margin and 12% vertical margin keep HUD perfectly within
+        // the circular optical sweet spot and clear of the nasal cutout / lens mask.
+        UINT marginX = (UINT)(texW * 0.10f);
+        if (marginX < 40) marginX = 40;
 
-            switch (g_hudPosIndex % 4) {
-            case 0: // Bottom-Center
-                dstX = (texW > curW) ? (texW - curW) / 2 : 0;
-                dstY = (texH > (curH + marginY)) ? (texH - curH - marginY) : 0;
-                break;
-            case 1: // Top-Center
-                dstX = (texW > curW) ? (texW - curW) / 2 : 0;
-                dstY = marginY;
-                break;
-            case 2: // Top-Right
-                dstX = (texW > (curW + marginX)) ? (texW - curW - marginX) : 0;
-                dstY = marginY;
-                break;
-            case 3: // Top-Left
-                dstX = marginX;
-                dstY = marginY;
-                break;
-            }
-        }
+        UINT marginY = (UINT)(texH * 0.12f);
+        if (marginY < 60) marginY = 60;
 
-        static bool s_firstBlitLogged = false;
-        if (!s_firstBlitLogged) {
-            s_firstBlitLogged = true;
-            char buf[256];
-            sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] First In-Engine Blit: Output=%ux%u (Fmt=%d), HUD=%ux%u, Dst=(%u,%u), VRMult=%d",
-                texW, texH, desc.Format, curW, curH, dstX, dstY, vrMult);
-            LogMsg(buf);
+        switch (g_hudPosIndex % 4) {
+        case 0: // Bottom-Center (Default)
+            dstX = (texW > curW) ? (texW - curW) / 2 : 0;
+            dstY = (texH > (curH + marginY)) ? (texH - curH - marginY) : 0;
+            break;
+        case 1: // Top-Center
+            dstX = (texW > curW) ? (texW - curW) / 2 : 0;
+            dstY = (texH > (curH + marginY)) ? marginY : 0;
+            break;
+        case 2: // Top-Right (45 deg)
+            dstX = (texW > (curW + marginX)) ? (texW - curW - marginX) : 0;
+            dstY = (texH > (curH + marginY)) ? marginY : 0;
+            break;
+        case 3: // Top-Left (45 deg)
+            dstX = (texW > (curW + marginX)) ? marginX : 0;
+            dstY = (texH > (curH + marginY)) ? marginY : 0;
+            break;
         }
 
         D3D12_RESOURCE_BARRIER barriers[2] = {};
@@ -1383,20 +1348,20 @@ static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParamete
 }
 
 // ----------------------------------------------------------------------------
-// In-Headset VR Blit Hook for renodx-dlss5.addon64 (RVA 0x8480)
+// In-Headset VR Blit Hook for renodx-dlss5.addon64 (RVA 0x376C0)
 // Direct Injection into VR Eye Render Target ("Output") for Quest 3 / Pimax
 // ----------------------------------------------------------------------------
-typedef int (__fastcall *PFN_RenoDX_InternalEvaluate)(void* pCmdList, void* pFeatureHandle, void* pParameters);
-static PFN_RenoDX_InternalEvaluate g_pfnTrampolineRenoDXEvaluate = NULL;
+typedef int (WINAPI *PFN_RenoDX_EvaluateFeature)(void* pCmdList, void* pHandle, void* pParameters, void* pCallback);
+static PFN_RenoDX_EvaluateFeature g_pfnTrampolineRenoDXEvaluate = NULL;
 static bool g_vrHookInstalled = false;
 
-static int __fastcall Hook_RenoDX_InternalEvaluate(void* pCmdList, void* pFeatureHandle, void* pParameters)
+static int WINAPI Hook_RenoDX_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
 {
     // 1. Exécuter l'évaluation DLSS 5 RenoDX d'origine
     int ret = 0;
     if (g_pfnTrampolineRenoDXEvaluate)
     {
-        ret = g_pfnTrampolineRenoDXEvaluate(pCmdList, pFeatureHandle, pParameters);
+        ret = g_pfnTrampolineRenoDXEvaluate(pCmdList, pHandle, pParameters, pCallback);
     }
 
     // 2. Si le HUD est actif, blitter directement sur la texture VR ("Output")
@@ -1421,61 +1386,8 @@ static int __fastcall Hook_RenoDX_InternalEvaluate(void* pCmdList, void* pFeatur
 
 static void InstallVRBlitHook()
 {
-    if (g_vrHookInstalled || !g_renodxBase) return;
-
-    void* target = (void*)(g_renodxBase + 0x8480);
-
-    // Vérifier les 19 octets du prologue pour certifier l'adresse RVA 0x8480
-    // 55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 48 06 00 00
-    const uint8_t expectedPrefix[19] = {
-        0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41,
-        0x54, 0x56, 0x57, 0x53, 0x48, 0x81, 0xEC, 0x48,
-        0x06, 0x00, 0x00
-    };
-    if (memcmp(target, expectedPrefix, sizeof(expectedPrefix)) != 0)
-    {
-        LogMsg("[Proxy] WARNING: renodx EvaluateFeature prefix mismatch at RVA 0x8480, skipping hook");
-        return;
-    }
-
-    // Allouer la mémoire exécutable pour le trampoline
-    uint8_t* tramp = (uint8_t*)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp)
-    {
-        LogMsg("[Proxy] ERROR: Failed to allocate trampoline memory for VR hook");
-        return;
-    }
-
-    // Copier les 19 octets d'origine
-    memcpy(tramp, target, 19);
-
-    // Écrire le saut absolu vers target + 19
-    uintptr_t returnAddr = (uintptr_t)target + 19;
-    tramp[19] = 0xFF;
-    tramp[20] = 0x25; // jmp qword ptr [rip + 0]
-    *(int32_t*)(tramp + 21) = 0;
-    *(uintptr_t*)(tramp + 25) = returnAddr;
-
-    g_pfnTrampolineRenoDXEvaluate = (PFN_RenoDX_InternalEvaluate)tramp;
-
-    // Patcher l'entrée : saut absolu vers Hook_RenoDX_InternalEvaluate + 5 NOPs = 19 octets
-    DWORD oldProtect = 0;
-    if (VirtualProtect(target, 19, PAGE_EXECUTE_READWRITE, &oldProtect))
-    {
-        uint8_t patch[19];
-        patch[0] = 0xFF;
-        patch[1] = 0x25;
-        *(int32_t*)(patch + 2) = 0;
-        *(uintptr_t*)(patch + 6) = (uintptr_t)Hook_RenoDX_InternalEvaluate;
-        memset(patch + 14, 0x90, 5); // NOPs
-
-        memcpy(target, patch, 19);
-        VirtualProtect(target, 19, oldProtect, &oldProtect);
-        FlushInstructionCache(GetCurrentProcess(), target, 19);
-
-        g_vrHookInstalled = true;
-        LogMsg("[Proxy] SUCCESS: In-Headset VR Blit Hook installed into renodx-dlss5.addon64 (RVA 0x8480)!");
-    }
+    // No-op: keep renodx-dlss5.addon64 100% native untouched
+    return;
 }
 
 extern "C" {
