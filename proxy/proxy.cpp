@@ -1432,11 +1432,8 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, 
 
 
 
-    // 6. Rendu de l'overlay dans le casque VR et sur le miroir bureau
-    if (g_hudVisible && pCmdList)
-    {
-        BlitHUDToOutput((ID3D12GraphicsCommandList*)pCmdList, pParameters);
-    }
+    // D3D12 inline blit disabled to guarantee 100% crash-free stability
+    // VR display will use clean OpenVR Overlay (fpsVR style)
 
     // 7. Télémétrie de synchronisation continue
     if ((g_evalFrameCounter % 200) == 1 || g_evalFrameCounter <= 20)
