@@ -8,12 +8,14 @@
 #include <stdint.h>
 #include <math.h>
 #include "font8x14.h"
+#include "openvr.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "xinput.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "openvr_api.lib")
 
 typedef HRESULT (WINAPI *PFN_CreateDXGIFactory)(REFIID riid, void **ppFactory);
 typedef HRESULT (WINAPI *PFN_CreateDXGIFactory1)(REFIID riid, void **ppFactory);
@@ -549,181 +551,130 @@ static void RenderHUD(bool masterEnable, float intensity, float tone, int preset
 
 
 // ----------------------------------------------------------------------------
-// Format Encoders & Upload Buffer Management
+// OpenVR SteamVR Native Compositor Overlay (fpsVR Architecture)
+// Zero-Crash, 100% Decoupled from Game Engine & D3D12 Pipeline
 // ----------------------------------------------------------------------------
-static inline uint16_t FloatToHalf(float f)
+static vr::IVROverlay* g_pVROverlay = NULL;
+static vr::VROverlayHandle_t g_hVROverlay = vr::k_ulOverlayHandleInvalid;
+static bool g_openvrInitialized = false;
+static uint64_t g_lastOpenVRInitAttempt = 0;
+
+static bool EnsureOpenVROverlay()
 {
-    uint32_t x = *(uint32_t*)&f;
-    uint32_t sign = (x >> 31) & 1;
-    int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
-    uint32_t mant = x & 0x7FFFFF;
-
-    if (exp <= 0) return (uint16_t)(sign << 15);
-    if (exp >= 31) return (uint16_t)((sign << 15) | 0x7C00);
-    return (uint16_t)((sign << 15) | (exp << 10) | (mant >> 13));
-}
-
-static inline uint32_t FloatToR11(float f)
-{
-    if (f <= 0.0f) return 0;
-    uint32_t x = *(uint32_t*)&f;
-    int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
-    uint32_t mant = x & 0x7FFFFF;
-    if (exp <= 0) return 0;
-    if (exp >= 31) return 0x7E0;
-    return ((exp << 6) | (mant >> 17)) & 0x7FF;
-}
-
-static inline uint32_t FloatToR10(float f)
-{
-    if (f <= 0.0f) return 0;
-    uint32_t x = *(uint32_t*)&f;
-    int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
-    uint32_t mant = x & 0x7FFFFF;
-    if (exp <= 0) return 0;
-    if (exp >= 31) return 0x3E0;
-    return ((exp << 5) | (mant >> 18)) & 0x3FF;
-}
-
-static ID3D12Resource* g_pUploadBuffer = NULL;
-static ID3D12Device* g_pDevice = NULL;
-static void* g_pMappedData = NULL;
-
-static bool EnsureUploadBuffer(ID3D12Device* pDev, UINT64 requiredSize)
-{
-    if (g_pUploadBuffer && g_pDevice == pDev) {
+    if (g_openvrInitialized && g_pVROverlay && g_hVROverlay != vr::k_ulOverlayHandleInvalid) {
         return true;
     }
-    if (g_pUploadBuffer) {
-        g_pUploadBuffer->Unmap(0, NULL);
-        g_pUploadBuffer->Release();
-        g_pUploadBuffer = NULL;
-        g_pMappedData = NULL;
-    }
-    g_pDevice = pDev;
 
-    D3D12_HEAP_PROPERTIES heapProps = {};
-    heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-    heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Alignment = 0;
-    desc.Width = requiredSize;
-    desc.Height = 1;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.Format = DXGI_FORMAT_UNKNOWN;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-    HRESULT hr = pDev->CreateCommittedResource(
-        &heapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &desc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        NULL,
-        IID_PPV_ARGS(&g_pUploadBuffer)
-    );
-
-    if (FAILED(hr) || !g_pUploadBuffer) {
+    uint64_t now = GetTickCount64();
+    if (now - g_lastOpenVRInitAttempt < 2000) {
         return false;
     }
+    g_lastOpenVRInitAttempt = now;
 
-    D3D12_RANGE readRange = { 0, 0 };
-    hr = g_pUploadBuffer->Map(0, &readRange, &g_pMappedData);
-    if (FAILED(hr) || !g_pMappedData) {
-        return false;
+    if (!g_openvrInitialized) {
+        vr::EVRInitError err = vr::VRInitError_None;
+        vr::IVRSystem* pSys = vr::VR_Init(&err, vr::VRApplication_Overlay);
+        if (err != vr::VRInitError_None || !pSys) {
+            char buf[128];
+            sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] SteamVR waiting... (code %d: %s)", 
+                err, vr::VR_GetVRInitErrorAsEnglishDescription(err));
+            LogMsg(buf);
+            return false;
+        }
+        g_openvrInitialized = true;
+        LogMsg("[OpenVR-Overlay] Successfully connected to SteamVR Compositor (VRApplication_Overlay)");
     }
 
-    LogMsg("[VR-DLSS5-HUD] Staging upload buffer armed successfully");
-    return true;
-}
-
-static bool WriteHUDToMappedData(DXGI_FORMAT format, UINT rowPitch, int scaleMode)
-{
-    if (!g_pMappedData) return false;
-
-    int scaleNum = 1, scaleDen = 1;
-    if (scaleMode == 1) { scaleNum = 3; scaleDen = 2; }      // 1.5x (Balanced / Quest 3)
-    else if (scaleMode == 2) { scaleNum = 2; scaleDen = 1; } // 2.0x (Comfort / Large)
-
-    int curW = (HUD_WIDTH * scaleNum) / scaleDen;
-    int curH = (HUD_HEIGHT * scaleNum) / scaleDen;
-
-    for (int y = 0; y < curH; y++) {
-        int srcY = (y * scaleDen) / scaleNum;
-        if (srcY >= HUD_HEIGHT) srcY = HUD_HEIGHT - 1;
-
-        uint8_t* pRow = (uint8_t*)g_pMappedData + y * rowPitch;
-
-        if (format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
-            for (int x = 0; x < curW; x++) {
-                int srcX = (x * scaleDen) / scaleNum;
-                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
-                HUDColor c = s_hudPixels[srcY][srcX];
-                pRow[x * 4 + 0] = c.r;
-                pRow[x * 4 + 1] = c.g;
-                pRow[x * 4 + 2] = c.b;
-                pRow[x * 4 + 3] = c.a;
-            }
-        }
-        else if (format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
-            for (int x = 0; x < curW; x++) {
-                int srcX = (x * scaleDen) / scaleNum;
-                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
-                HUDColor c = s_hudPixels[srcY][srcX];
-                pRow[x * 4 + 0] = c.b;
-                pRow[x * 4 + 1] = c.g;
-                pRow[x * 4 + 2] = c.r;
-                pRow[x * 4 + 3] = c.a;
-            }
-        }
-        else if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-            uint16_t* pRow16 = (uint16_t*)pRow;
-            for (int x = 0; x < curW; x++) {
-                int srcX = (x * scaleDen) / scaleNum;
-                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
-                HUDColor c = s_hudPixels[srcY][srcX];
-                pRow16[x * 4 + 0] = FloatToHalf((float)c.r / 255.0f);
-                pRow16[x * 4 + 1] = FloatToHalf((float)c.g / 255.0f);
-                pRow16[x * 4 + 2] = FloatToHalf((float)c.b / 255.0f);
-                pRow16[x * 4 + 3] = FloatToHalf((float)c.a / 255.0f);
-            }
-        }
-        else if (format == DXGI_FORMAT_R10G10B10A2_UNORM) {
-            uint32_t* pRow32 = (uint32_t*)pRow;
-            for (int x = 0; x < curW; x++) {
-                int srcX = (x * scaleDen) / scaleNum;
-                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
-                HUDColor c = s_hudPixels[srcY][srcX];
-                uint32_t r10 = (uint32_t)c.r * 1023 / 255;
-                uint32_t g10 = (uint32_t)c.g * 1023 / 255;
-                uint32_t b10 = (uint32_t)c.b * 1023 / 255;
-                uint32_t a2 = (uint32_t)c.a * 3 / 255;
-                pRow32[x] = (r10) | (g10 << 10) | (b10 << 20) | (a2 << 30);
-            }
-        }
-        else if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
-            uint32_t* pRow32 = (uint32_t*)pRow;
-            for (int x = 0; x < curW; x++) {
-                int srcX = (x * scaleDen) / scaleNum;
-                if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
-                HUDColor c = s_hudPixels[srcY][srcX];
-                uint32_t r11 = FloatToR11((float)c.r / 255.0f);
-                uint32_t g11 = FloatToR11((float)c.g / 255.0f);
-                uint32_t b10 = FloatToR10((float)c.b / 255.0f);
-                pRow32[x] = (r11) | (g11 << 11) | (b10 << 22);
-            }
-        }
-        else {
+    if (!g_pVROverlay) {
+        g_pVROverlay = vr::VROverlay();
+        if (!g_pVROverlay) {
+            LogMsg("[OpenVR-Overlay] ERROR: VROverlay interface is NULL");
             return false;
         }
     }
+
+    if (g_hVROverlay == vr::k_ulOverlayHandleInvalid) {
+        vr::EVROverlayError ovrErr = g_pVROverlay->CreateOverlay("VRDLSS5_HUD", "DLSS 5 VR Controller", &g_hVROverlay);
+        if (ovrErr != vr::VROverlayError_None) {
+            char buf[128];
+            sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] CreateOverlay failed: %d", ovrErr);
+            LogMsg(buf);
+            return false;
+        }
+        g_pVROverlay->SetOverlayAlpha(g_hVROverlay, 0.95f);
+        LogMsg("[OpenVR-Overlay] SteamVR Overlay created and armed successfully!");
+    }
+
     return true;
+}
+
+static void UpdateOpenVROverlay(bool visible, bool isDirty)
+{
+    static bool s_lastVRVisible = false;
+
+    if (!EnsureOpenVROverlay()) {
+        return;
+    }
+
+    if (!visible) {
+        if (s_lastVRVisible) {
+            g_pVROverlay->HideOverlay(g_hVROverlay);
+            s_lastVRVisible = false;
+        }
+        return;
+    }
+
+    if (!s_lastVRVisible) {
+        g_pVROverlay->ShowOverlay(g_hVROverlay);
+        s_lastVRVisible = true;
+        isDirty = true;
+    }
+
+    static int s_lastScale = -1;
+    static int s_lastPos = -1;
+    if (s_lastScale != g_hudScale || s_lastPos != g_hudPosIndex) {
+        s_lastScale = g_hudScale;
+        s_lastPos = g_hudPosIndex;
+
+        float widthInMeters = 0.48f;
+        if (g_hudScale == 0) widthInMeters = 0.38f;      // 1.0x Compact / Pimax
+        else if (g_hudScale == 1) widthInMeters = 0.48f; // 1.5x Balanced (Quest 3 / Pimax Default)
+        else if (g_hudScale == 2) widthInMeters = 0.60f; // 2.0x Comfort
+        g_pVROverlay->SetOverlayWidthInMeters(g_hVROverlay, widthInMeters);
+
+        float posX = 0.0f;
+        float posY = -0.25f; // Sweet spot bas (fpsVR / dashboard)
+        float posZ = -0.80f; // 80 cm de distance
+
+        switch (g_hudPosIndex % 4) {
+        case 0: // Bas-Centre
+            posX = 0.0f; posY = -0.25f; posZ = -0.80f;
+            break;
+        case 1: // Haut-Centre
+            posX = 0.0f; posY = +0.22f; posZ = -0.80f;
+            break;
+        case 2: // Haut-Droite
+            posX = +0.28f; posY = +0.18f; posZ = -0.80f;
+            break;
+        case 3: // Haut-Gauche
+            posX = -0.28f; posY = +0.18f; posZ = -0.80f;
+            break;
+        }
+
+        vr::HmdMatrix34_t mat = {};
+        mat.m[0][0] = 1.0f;
+        mat.m[1][1] = 1.0f;
+        mat.m[2][2] = 1.0f;
+        mat.m[0][3] = posX;
+        mat.m[1][3] = posY;
+        mat.m[2][3] = posZ;
+
+        g_pVROverlay->SetOverlayTransformTrackedDeviceRelative(g_hVROverlay, vr::k_unTrackedDeviceIndex_Hmd, &mat);
+    }
+
+    if (isDirty) {
+        g_pVROverlay->SetOverlayRaw(g_hVROverlay, s_hudPixels, HUD_WIDTH, HUD_HEIGHT, 4);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1016,7 +967,7 @@ static HBITMAP g_hOSDBmp = NULL;
 static uint32_t* g_pOSDBits = NULL;
 static int g_currentOSDScale = -1;
 
-static void UpdateOSDWindow(bool visible)
+static void UpdateOSDWindow(bool visible, bool isDirty)
 {
     static bool s_lastVisible = false;
     if (!visible) {
@@ -1029,10 +980,9 @@ static void UpdateOSDWindow(bool visible)
         return;
     }
 
-    if (!g_hudDirty && s_lastVisible) {
+    if (!isDirty && s_lastVisible) {
         return; // Zero CPU / GDI / DWM work when HUD is static
     }
-    g_hudDirty = false;
     s_lastVisible = true;
 
     // 1. Enregistrer la classe de fenêtre
@@ -1088,10 +1038,7 @@ static void UpdateOSDWindow(bool visible)
 
     if (!g_pOSDBits) return;
 
-    // 5. Dessiner le HUD dans s_hudPixels
-    RenderHUD(g_masterEnable, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_activeRow, g_hudPosIndex, g_liveHz);
-
-    // 6. Transférer avec alpha prémultiplié pour UpdateLayeredWindow
+    // 5. Transférer avec alpha prémultiplié pour UpdateLayeredWindow (s_hudPixels déjà dessiné)
     for (int y = 0; y < curH; y++) {
         int srcY = (y * scaleDen) / scaleNum;
         if (srcY >= HUD_HEIGHT) srcY = HUD_HEIGHT - 1;
@@ -1151,23 +1098,12 @@ static void UpdateOSDWindow(bool visible)
 // ----------------------------------------------------------------------------
 // Autonomous Input Watcher Thread (100% Découplé, Zero Crash, 0 ms RAM Sync)
 // ----------------------------------------------------------------------------
-static void InstallVRBlitHook();
-
 static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
 {
     LogMsg("[Proxy] Input Watcher Thread started.");
 
-    // Attendre que le jeu et les modules s'initialisent
-    for (int i = 0; i < 30; i++) {
-        Sleep(100);
-        if (!g_renodxBase) {
-            g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
-            if (g_renodxBase) {
-                LogMsg("[Proxy] Discovered renodx-dlss5.addon64 in memory!");
-                InstallVRBlitHook();
-            }
-        }
-    }
+    // Tenter la connexion immédiate à SteamVR Overlay
+    EnsureOpenVROverlay();
 
     HDC hdc = GetDC(NULL);
     if (hdc) {
@@ -1182,23 +1118,25 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
     {
         uint64_t now = GetTickCount64();
 
-        // 1. Découverte continue et armement du hook VR casque
-        if (!g_renodxBase) {
-            g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
-            if (g_renodxBase) {
-                LogMsg("[Proxy] Discovered renodx-dlss5.addon64 in memory!");
-                InstallVRBlitHook();
-            }
-        }
-
-        // 2. Initialiser paresseusement les variables au premier lancement
+        // 1. Initialiser paresseusement les variables au premier lancement
         InitVariablesFromAddonOrIni();
+
+        // 2. Maintenir la connexion OpenVR active
+        EnsureOpenVROverlay();
 
         // 3. Écouter les entrées clavier (F6) et manettes (Select+L3)
         PollInput();
 
-        // 4. Mettre à jour la fenêtre OSD flottante transparente
-        UpdateOSDWindow(g_hudVisible);
+        // 4. Mettre à jour les affichages Bureau et Casque VR
+        bool isDirty = g_hudDirty;
+        if (g_hudVisible && isDirty) {
+            RenderHUD(g_masterEnable, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_activeRow, g_hudPosIndex, g_liveHz);
+        }
+        UpdateOSDWindow(g_hudVisible, isDirty);
+        UpdateOpenVROverlay(g_hudVisible, isDirty);
+        if (isDirty) {
+            g_hudDirty = false;
+        }
 
         // 5. Persistence différée (500 ms debounce sans micro-stutter)
         if (g_hasPendingSave && (now - g_lastChangeTick >= 500))
@@ -1213,181 +1151,6 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         Sleep(g_hudVisible ? 33 : 50);
     }
     return 0;
-}
-
-// ----------------------------------------------------------------------------
-// D3D12 In-Game VR & Desktop Overlay Blitter (Pimax & Quest 3 Sweet-Spot)
-// ----------------------------------------------------------------------------
-static void BlitHUDToOutput(ID3D12GraphicsCommandList* pCmdList, void* pParameters)
-{
-    if (!pCmdList || !pParameters || !g_hudVisible) return;
-
-    __try {
-        void** vtable = *(void***)pParameters;
-        if (!vtable || !vtable[9]) return;
-
-        typedef int (__fastcall *PFN_NGX_GetD3D12Resource)(void* thisPtr, const char* name, ID3D12Resource** ppOut);
-        PFN_NGX_GetD3D12Resource getRes = (PFN_NGX_GetD3D12Resource)vtable[9];
-
-        ID3D12Resource* pOutput = NULL;
-        int ret = getRes(pParameters, "Output", &pOutput);
-        if (ret < 0 || (ret & 0xFFF00000) == 0xBAD00000 || !pOutput) return;
-
-        D3D12_RESOURCE_DESC desc = pOutput->GetDesc();
-        if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return;
-
-        ID3D12Device* pDevice = NULL;
-        HRESULT hr = pOutput->GetDevice(__uuidof(ID3D12Device), (void**)&pDevice);
-        if (FAILED(hr) || !pDevice) return;
-
-        // Determine current width and height based on scale
-        int scaleNum = 1, scaleDen = 1;
-        if (g_hudScale == 1) { scaleNum = 3; scaleDen = 2; }      // 1.5x (Balanced / Quest 3 default)
-        else if (g_hudScale == 2) { scaleNum = 2; scaleDen = 1; } // 2.0x (Comfort / Large Quest 3)
-
-        UINT curW = (HUD_WIDTH * scaleNum) / scaleDen;
-        UINT curH = (HUD_HEIGHT * scaleNum) / scaleDen;
-
-        UINT bytesPerPixel = 4;
-        if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM) {
-            bytesPerPixel = 8;
-        }
-
-        UINT rowPitch = (curW * bytesPerPixel + 255) & ~255;
-        UINT requiredSize = 2 * 1024 * 1024; // 2 MB buffer covers up to 2.0x scale in FP16
-
-        if (!EnsureUploadBuffer(pDevice, requiredSize)) {
-            pDevice->Release();
-            return;
-        }
-
-        RenderHUD(g_masterEnable, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_activeRow, g_hudPosIndex, g_liveHz);
-
-        if (!WriteHUDToMappedData(desc.Format, rowPitch, g_hudScale)) {
-            pDevice->Release();
-            return;
-        }
-
-        UINT texW = (UINT)desc.Width;
-        UINT texH = desc.Height;
-        UINT dstX = 0;
-        UINT dstY = 0;
-
-        // Proportional safety margins for VR lenses (Quest 3 Pancake & Pimax Fresnel):
-        // 10% horizontal margin and 12% vertical margin keep HUD perfectly within
-        // the circular optical sweet spot and clear of the nasal cutout / lens mask.
-        UINT marginX = (UINT)(texW * 0.10f);
-        if (marginX < 40) marginX = 40;
-
-        UINT marginY = (UINT)(texH * 0.12f);
-        if (marginY < 60) marginY = 60;
-
-        switch (g_hudPosIndex % 4) {
-        case 0: // Bottom-Center (Default)
-            dstX = (texW > curW) ? (texW - curW) / 2 : 0;
-            dstY = (texH > (curH + marginY)) ? (texH - curH - marginY) : 0;
-            break;
-        case 1: // Top-Center
-            dstX = (texW > curW) ? (texW - curW) / 2 : 0;
-            dstY = (texH > (curH + marginY)) ? marginY : 0;
-            break;
-        case 2: // Top-Right (45 deg)
-            dstX = (texW > (curW + marginX)) ? (texW - curW - marginX) : 0;
-            dstY = (texH > (curH + marginY)) ? marginY : 0;
-            break;
-        case 3: // Top-Left (45 deg)
-            dstX = (texW > (curW + marginX)) ? marginX : 0;
-            dstY = (texH > (curH + marginY)) ? marginY : 0;
-            break;
-        }
-
-        D3D12_RESOURCE_BARRIER barriers[2] = {};
-        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        barriers[0].Transition.pResource = pOutput;
-        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        pCmdList->ResourceBarrier(1, &barriers[0]);
-
-        D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
-        dstLoc.pResource = pOutput;
-        dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dstLoc.SubresourceIndex = 0;
-
-        D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
-        srcLoc.pResource = g_pUploadBuffer;
-        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        srcLoc.PlacedFootprint.Offset = 0;
-        srcLoc.PlacedFootprint.Footprint.Format = desc.Format;
-        srcLoc.PlacedFootprint.Footprint.Width = curW;
-        srcLoc.PlacedFootprint.Footprint.Height = curH;
-        srcLoc.PlacedFootprint.Footprint.Depth = 1;
-        srcLoc.PlacedFootprint.Footprint.RowPitch = rowPitch;
-
-        D3D12_BOX box = { 0, 0, 0, curW, curH, 1 };
-        pCmdList->CopyTextureRegion(&dstLoc, dstX, dstY, 0, &srcLoc, &box);
-
-        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        barriers[1].Transition.pResource = pOutput;
-        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        pCmdList->ResourceBarrier(1, &barriers[1]);
-
-        pDevice->Release();
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        static bool s_logged = false;
-        if (!s_logged) {
-            s_logged = true;
-            LogMsg("[VR-DLSS5-HUD] EXCEPTION safely caught during HUD blit");
-        }
-    }
-}
-
-// ----------------------------------------------------------------------------
-// In-Headset VR Blit Hook for renodx-dlss5.addon64 (RVA 0x376C0)
-// Direct Injection into VR Eye Render Target ("Output") for Quest 3 / Pimax
-// ----------------------------------------------------------------------------
-typedef int (WINAPI *PFN_RenoDX_EvaluateFeature)(void* pCmdList, void* pHandle, void* pParameters, void* pCallback);
-static PFN_RenoDX_EvaluateFeature g_pfnTrampolineRenoDXEvaluate = NULL;
-static bool g_vrHookInstalled = false;
-
-static int WINAPI Hook_RenoDX_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
-{
-    // 1. Exécuter l'évaluation DLSS 5 RenoDX d'origine
-    int ret = 0;
-    if (g_pfnTrampolineRenoDXEvaluate)
-    {
-        ret = g_pfnTrampolineRenoDXEvaluate(pCmdList, pHandle, pParameters, pCallback);
-    }
-
-    // 2. Si le HUD est actif, blitter directement sur la texture VR ("Output")
-    if (g_hudVisible && pCmdList && pParameters)
-    {
-        BlitHUDToOutput((ID3D12GraphicsCommandList*)pCmdList, pParameters);
-    }
-
-    // 3. Télémétrie périodique (toutes les 3s quand le menu est ouvert)
-    static uint64_t s_lastVRBlitLog = 0;
-    uint64_t now = GetTickCount64();
-    if (g_hudVisible && (now - s_lastVRBlitLog >= 3000))
-    {
-        s_lastVRBlitLog = now;
-        char buf[128];
-        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] In-Headset VR Blit active (CmdList=%p, Params=%p)", pCmdList, pParameters);
-        LogMsg(buf);
-    }
-
-    return ret;
-}
-
-static void InstallVRBlitHook()
-{
-    // No-op: keep renodx-dlss5.addon64 100% native untouched
-    return;
 }
 
 extern "C" {
