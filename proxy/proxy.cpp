@@ -44,10 +44,29 @@ static PFN_DXGIGetDebugInterface1 g_pfnDXGIGetDebugInterface1 = NULL;
 
 static void LogMsg(const char *msg)
 {
-    FILE *f = fopen("vr_dlss5_proxy.log", "a");
+    static char logPath[MAX_PATH] = "";
+    if (logPath[0] == '\0')
+    {
+        if (GetModuleFileNameA(NULL, logPath, MAX_PATH))
+        {
+            char* lastSlash = strrchr(logPath, '\\');
+            if (lastSlash)
+            {
+                *(lastSlash + 1) = '\0';
+                strcat_s(logPath, MAX_PATH, "vr_dlss5_proxy.log");
+            }
+            else
+            {
+                strcpy_s(logPath, MAX_PATH, "vr_dlss5_proxy.log");
+            }
+        }
+    }
+    FILE *f = NULL;
+    fopen_s(&f, logPath, "a");
     if (f)
     {
         fprintf(f, "%s\n", msg);
+        fflush(f);
         fclose(f);
     }
 }
@@ -250,6 +269,7 @@ static bool g_varsInitialized = false;
 
 // HUD State
 static bool g_hudVisible = false;
+static bool g_hudDirty = true;
 static bool g_masterEnable = true;
 static float g_nrIntensity = 2.50f;
 static float g_nrGlobalTone = 1.00f;
@@ -791,6 +811,7 @@ static void PollInput()
 
     if (toggleRequested) {
         g_hudVisible = !g_hudVisible;
+        g_hudDirty = true;
         char buf[128];
         sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] Overlay toggled: %s (Source: %s)", 
             g_hudVisible ? "OPEN" : "CLOSED",
@@ -816,6 +837,7 @@ static void PollInput()
     bool padB = ((xButtons & XINPUT_GAMEPAD_B) != 0) || ((dButtons & 0x0004) != 0);
     if (g_keys[VK_ESCAPE].justPressed || (padB && !s_prevPadB)) {
         g_hudVisible = false;
+        g_hudDirty = true;
         LogMsg("[VR-DLSS5-HUD] Overlay closed");
         return;
     }
@@ -826,6 +848,7 @@ static void PollInput()
     bool padY = ((xButtons & XINPUT_GAMEPAD_Y) != 0) || ((dButtons & 0x0008) != 0);
     if (g_keys[VK_TAB].justPressed || (padY && !s_prevPadY)) {
         g_hudPosIndex = (g_hudPosIndex + 1) % 4;
+        g_hudDirty = true;
         static const char* posNames[] = { "Bottom-Center", "Top-Center", "Top-Right", "Top-Left" };
         char buf[128];
         sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] Position changed to: %s", posNames[g_hudPosIndex]);
@@ -840,6 +863,7 @@ static void PollInput()
     bool padR3 = ((xButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0) || ((dButtons & 0x0800) != 0);
     if (g_keys[VK_F7].justPressed || (padR3 && !s_prevPadR3)) {
         g_hudScale = (g_hudScale + 1) % 3;
+        g_hudDirty = true;
         static const char* scaleNames[] = { "1.0x (Compact)", "1.5x (Balanced Q3)", "2.0x (Comfort Q3)" };
         char buf[128];
         sprintf_s(buf, sizeof(buf), "[VR-DLSS5-HUD] Scale toggled to: %s", scaleNames[g_hudScale]);
@@ -859,9 +883,11 @@ static void PollInput()
 
     if (g_keys[VK_UP].justPressed || (padUp && !s_prevPadUp)) {
         g_activeRow = (g_activeRow + 4) % 5;
+        g_hudDirty = true;
     }
     if (g_keys[VK_DOWN].justPressed || (padDown && !s_prevPadDown)) {
         g_activeRow = (g_activeRow + 1) % 5;
+        g_hudDirty = true;
     }
     s_prevPadUp = padUp;
     s_prevPadDown = padDown;
@@ -957,6 +983,7 @@ static void PollInput()
 
     // Real-time immediate RAM update & Arm 500ms debounce
     if (valueChanged) {
+        g_hudDirty = true;
         g_hasPendingSave = true;
         g_lastChangeTick = now;
 
@@ -985,12 +1012,22 @@ static int g_currentOSDScale = -1;
 
 static void UpdateOSDWindow(bool visible)
 {
+    static bool s_lastVisible = false;
     if (!visible) {
-        if (g_hOSDWnd && IsWindowVisible(g_hOSDWnd)) {
-            ShowWindow(g_hOSDWnd, SW_HIDE);
+        if (s_lastVisible) {
+            if (g_hOSDWnd && IsWindowVisible(g_hOSDWnd)) {
+                ShowWindow(g_hOSDWnd, SW_HIDE);
+            }
+            s_lastVisible = false;
         }
         return;
     }
+
+    if (!g_hudDirty && s_lastVisible) {
+        return; // Zero CPU / GDI / DWM work when HUD is static
+    }
+    g_hudDirty = false;
+    s_lastVisible = true;
 
     // 1. Enregistrer la classe de fenêtre
     static bool s_classRegistered = false;
@@ -1158,7 +1195,10 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
             CommitSettingsToDisk();
         }
 
-        Sleep(16); // ~60 Hz
+        // Mode ultra-leger zero-stutter pour VR (LukeRoss 72Hz Quest 3 / Pimax) :
+        // - HUD ferme : 20 Hz (Sleep 50ms) -> CPU quasi 0.000%, reactivite F6 / Select+L3 instantanee (50ms)
+        // - HUD ouvert : 30 Hz (Sleep 33ms) -> navigation fluide, et zero recalcul/blit si inactif (g_hudDirty)
+        Sleep(g_hudVisible ? 33 : 50);
     }
     return 0;
 }
@@ -1335,20 +1375,7 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, 
     else if (abs(displayHz - 120) <= 3) displayHz = 120;
     g_liveHz = displayHz;
 
-    // 4. Polling utilisateur (Clavier + Manette)
-    static uint64_t s_lastInputTick = 0;
-    if (now - s_lastInputTick >= 8)
-    {
-        s_lastInputTick = now;
-        PollInput();
-    }
 
-    // 5. Persistence différée (500 ms debounce sans micro-stutter)
-    if (g_hasPendingSave && (now - g_lastChangeTick >= 500))
-    {
-        g_hasPendingSave = false;
-        CommitSettingsToDisk();
-    }
 
     // 6. Rendu de l'overlay dans le casque VR et sur le miroir bureau
     if (g_hudVisible && pCmdList)
