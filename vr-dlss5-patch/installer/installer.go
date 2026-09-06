@@ -321,6 +321,14 @@ func ensureLukeRossCompatibility(gameDir, proxyTarget string) {
 			}
 		}
 
+		// Patch de la sentinelle de réutilisation de tampon de sortie (Render Target Aliasing Loop Guard) à l'offset 0x7E1D :
+		// 0F 84 BE 07 00 00 (je 0x8FE1) -> 90 90 90 90 90 90 (force l'évaluation récurrente sur 100% des frames en VR stéréoscopique)
+		rtGuardOff := 0x7E1D
+		if len(aData) > rtGuardOff+6 && bytes.Equal(aData[rtGuardOff:rtGuardOff+6], []byte{0x0F, 0x84, 0xBE, 0x07, 0x00, 0x00}) {
+			copy(aData[rtGuardOff:rtGuardOff+6], nop6)
+			aModified = true
+		}
+
 		if aModified {
 			_ = os.WriteFile(addonPath, aData, 0644)
 		}

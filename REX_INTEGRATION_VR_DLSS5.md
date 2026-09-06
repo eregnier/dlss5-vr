@@ -264,16 +264,35 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
    - Déverrouillage universel du dispatcher central 0x36FF0 :
      - Bypass des 5 portes de validation d'état hôte aux offsets `0x36643`, `0x36650`, `0x3665D`, `0x3666A`, `0x36677` (5x 6 octets NOP).
 
-### 4.3 Architecture Souveraine : Chaîne Ininterrompue LukeRoss & Télémétrie Continue
-- **Détour mémoire inconditionnel (15 octets) dans `proxy/proxy.cpp`** :
-  Dès que `RealVR64.dll` est chargé par le proxy au démarrage du jeu, notre DLL pose un hook mémoire direct permanent sur `RealVR64:NVSDK_NGX_D3D12_EvaluateFeature` (`jmp [rip+0]` 14 octets + 1 NOP avec trampoline de retour de 15 octets aligné sur `push r12`).
-  - Ce hook garantit la télémétrie en direct sans perturber le cycle de vie des frames VR.
-  - Notre proxy appelle systématiquement `g_pfnNGXEvaluateFeature`, garantissant que LukeRoss exécute 100% de ses évaluations stéréoscopiques et maintient la parité des frames.
-  - L'évaluation neuronale DLSS 5 est ensuite déclenchée en aval par le hook inconditionnel de RenoDX sur `_nvngx.dll`.
-- **Télémétrie en temps réel dans `vr_dlss5_proxy.log`** :
-  Enregistrement continu du compteur de frames VR (`[VR-DLSS5-Telemetry] Continuous VR frame #X: gameHandle=%p, eval_ret=0x00000001`).
-- **Indépendance Totale & Généralisation** :
-  Cette mécanique est 100% universelle et reproductible pour tous les jeux LukeRoss VR (Avatar, Cyberpunk, Horizon, etc.).
+### 3.9 Découverte Majeure : La Sentinelle de Réutilisation de Render Target (0x7E1D / 0x18000881D)
+- **Symptôme** : RenoDX évaluait parfaitement les premières frames (15 frames sous DLSS SR, puis exactement 4 frames sous DLSS-D Ray Reconstruction), puis le compteur `0x1969F8` restait figé (ex: à 19) alors que LukeRoss envoyait ~11 appels par seconde en continu (`0x196E80` > 22 000).
+- **Analyse binaire & Reverse-Engineering de `0x180008480`** :
+  - RenoDX maintient une table de hachage `std::unordered_map` (`0x180196458`) indexée par pointeur `ID3D12Resource*` (la texture de sortie `Output`).
+  - Dès qu'une frame réussit l'évaluation neuronale Feature 18, RenoDX stocke le handle Feature 18 (`[0x180193438]`) à l'offset `+0x18` de l'entrée dans la map :
+    ```asm
+    0x18000ABB0: mov rsi, qword ptr [0x180193438h] ; Feature 18 Handle
+    0x18000ABC5: call 0x180012420                 ; Insertion dans unordered_map
+    0x18000ABD1: mov qword ptr [rax+18h], rsi      ; entry->val = Feature 18 Handle
+    ```
+  - Lors de chaque appel ultérieur, avant de lancer le calcul neuronal, RenoDX consulte la table :
+    ```asm
+    0x180008812: mov rax, qword ptr [rax+18h]
+    0x180008816: cmp rax, qword ptr [0000000180193438h]
+    0x18000881D: 0F 84 BE 07 00 00  je 0000000180008FE1 ; ABANDON IMMEDIAT (xor eax, eax; ret)
+    ```
+  - **Origine du blocage en VR** : En VR stéréoscopique (LukeRoss), le mod et le moteur réutilisent en boucle un pool fixe de 2 à 4 textures de rendu swapchain (double/triple buffering œil gauche / œil droit). Dès que ces 4 tampons ont chacun été évalués une fois (16, 17, 18, 19), la condition `rax == [0x193438]` devient vraie sur 100% des frames suivantes, et l'instruction `0x18000881D` court-circuite systématiquement l'exécution !
+- **Solution chirurgicale** :
+  - Patcher l'offset fichier **`0x7E1D`** (RVA `0x881D`) dans `renodx-dlss5.addon64` :
+    `0F 84 BE 07 00 00` -> `90 90 90 90 90 90` (6x NOP).
+  - L'exécution traverse alors sans interruption vers `0x180008823` comme pour un nouveau buffer, garantissant une reconstruction neuronale récurrente à l'infini sur 100% des frames stéréoscopiques.
+
+### 3.10 Éradication des Crashs : Suppression du Détour Inline Non-SEH sur RealVR64
+- **Symptôme** : Le jeu crashait de manière aléatoire après 1 à 2 minutes de jeu en VR.
+- **Origine** : Un hook inline de 15 octets (`VirtualProtect` + trampoline brut) avait été posé sur `RealVR64:EvaluateFeature`. En architecture x64 sous Windows, tout code exécuté sans table `.pdata` / RUNTIME_FUNCTION enregistrée auprès du système brise le stack walking du moteur d'exceptions SEH lors des appels asynchrones multithreadés à 90 Hz.
+- **Solution pérenne (Zero-Crash Architecture)** :
+  - Suppression totale du détour mémoire inline dans `proxy/proxy.cpp`. `RealVR64.dll` reste 100% intact en mémoire.
+  - Ordonnancement strict du chargement : notre `dxgi.dll` charge **d'abord** `ReShade64_dlss5.dll` (qui installe proprement ses hooks MinHook sur `_nvngx.dll`), **puis** `RealVR64.dll`.
+  - La table d'export de LukeRoss (`[RealVR64 + 0x7B83C0]`) encapsule alors naturellement RenoDX sans aucune manipulation de mémoire vive. Stabilité absolue garantie.
 
 ---
 
