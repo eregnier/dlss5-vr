@@ -1,21 +1,25 @@
-# Binaires compilés
+﻿# Binaires compilés et bibliothèques intermédiaires
 *.exe
-*.exe~
-*.dll.tmp
 *.obj
 *.exp
 *.lib
+*.pdb
+*.idb
+*.exe~
+*.dll.tmp
+
+# Fichiers temporaires & logs
+*.log
+*.tmp
+*.bak
+__pycache__/
+*.pyc
 
 # Archives
 *.zip
 *.7z
 *.rar
 *.tar.gz
-
-# Logs & temporaires
-*.log
-*.tmp
-*.bak
 
 # Cache local
 cache/
@@ -32,5 +36,3 @@ Desktop.ini
 .DS_Store
 .vscode/
 .idea/
-
-tools/

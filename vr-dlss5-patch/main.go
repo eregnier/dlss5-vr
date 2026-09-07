@@ -162,12 +162,27 @@ func main() {
 		}
 	}
 
+	var cudartPath string
+	cudartCandidates := []string{
+		filepath.Join("deps", "cudart64_12.dll"),
+		filepath.Join(execDir, "deps", "cudart64_12.dll"),
+		filepath.Join(execDir, "cudart64_12.dll"),
+		`C:\code\vrdlss5\deps\cudart64_12.dll`,
+	}
+	for _, c := range cudartCandidates {
+		if fi, err := os.Stat(c); err == nil && fi.Size() > 100*1024 {
+			cudartPath = c
+			break
+		}
+	}
+
 	plan := &installer.InstallPlan{
 		ReShadeDllPath: reshadeDll,
 		AddonPath:      addonPath,
 		ModelPath:      modelPath,
 		BridgePath:     bridgePath,
 		DualProxyPath:  dualProxyPath,
+		CudartPath:     cudartPath,
 	}
 
 	actions, err := installer.Install(info, plan, dryRun)

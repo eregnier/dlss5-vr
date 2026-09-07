@@ -1,122 +1,139 @@
-# VR DLSS 5 : Intégration LukeRoss REAL VR & DLSS 5 Neural Rendering
+﻿# DLSS 5 <> VR : Intégration LukeRoss REAL VR & DLSS 5 Neural Reconstruction
 
-Ce projet fournit les outils, l'architecture et la documentation permettant de faire fonctionner simultanément le **mod REAL VR de LukeRoss** (OpenXR / SteamVR) et le moteur **DLSS 5 Neural Rendering** (ReShade Add-on build + `renodx-dlss5` + modèle `nvngx_dlssnr.dll`), **sans décompiler ni recompiler de binaires**.
+Ce dépôt fournit l'architecture complète, le double proxy C++ haute performance, les outils d'automatisation et la documentation technique permettant de faire fonctionner simultanément le **mod REAL VR de LukeRoss** (OpenXR / SteamVR) et le moteur **DLSS 5 Neural Reconstruction** (ReShade 6.8+ Add-on + `renodx-dlss5` + `nvngx_dlssnr.dll`), avec un HUD de contrôle in-game natif (VR & Bureau) et le débridage de l'évaluation continue en temps réel.
 
 ---
 
 ## Sommaire
 
-1. [Le Problème & La Solution](#le-problème--la-solution)
-2. [Structure du Dépôt](#structure-du-dépôt)
-3. [Démarrage Rapide avec `vr-dlss5-patch`](#démarrage-rapide-avec-vr-dlss5-patch)
-4. [Commandes & Options](#commandes--options)
-5. [Fonctionnement en Jeu](#fonctionnement-en-jeu)
-6. [Documentation Détaillée](#documentation-détaillée)
+1. [Architecture & Fonctionnalités](#architecture--fonctionnalités)
+2. [Organisation du Répertoire](#organisation-du-répertoire)
+3. [Compilation & Déploiement Rapide](#compilation--déploiement-rapide)
+4. [Contrôles In-Game (HUD & Raccourcis)](#contrôles-in-game-hud--raccourcis)
+5. [Outils & Diagnostics](#outils--diagnostics)
+6. [Documentation Complète](#documentation-complète)
 
 ---
 
-## Le Problème & La Solution
+## Architecture & Fonctionnalités
 
-### Le conflit initial
-- Le mod VR de LukeRoss utilise une version interne de **ReShade 4.9.1** embarquée dans `RealVR64.dll` (déployée en tant que `dxgi.dll`). Cette version ne prend pas en charge l'API ReShade Add-on (introduite en ReShade 5.0+).
-- Le DLSS 5 (`renodx-dlss5.addon64`) est un **add-on natif C++** nécessitant **ReShade 6.x avec support Add-on**.
-- Par défaut, les deux outils réclament le même nom de fichier proxy (`dxgi.dll`) : l'un écrase l'autre (soit on perd la VR, soit on perd le DLSS 5).
+### Le Problème
+- Le mod VR de LukeRoss intercepte `dxgi.dll` pour injecter son moteur stéréoscopique et son runtime OpenXR/SteamVR.
+- Le moteur DLSS 5 Neural Rendering (ReShade Add-on) requiert ReShade 6.8+, l'accès direct aux buffers D3D12, et évalue habituellement le rendu à chaque frame desktop.
+- En VR, RenoDX se désactivait après la première frame (mise en sommeil de la boucle d'évaluation), et les deux frameworks entraient en conflit sur le hook DXGI.
 
-### La solution : Le Chaînage de Proxies (Double Hooking)
-Sans toucher aux binaires :
-1. **`dxgi.dll`** reste le mod **LukeRoss VR** : il initialise le casque VR (OpenXR / SteamVR), gère la caméra stéréoscopique et applique le correctif de jitter DLSS par œil.
-2. **`dinput8.dll`** (ou `d3d12.dll`) reçoit **ReShade 6.8+ (Add-on build)** : chargé automatiquement par le jeu, il détecte et charge `renodx-dlss5.addon64` et le modèle neuronal `nvngx_dlssnr.dll`.
-
-```
-[ Jeu (ex: afop.exe) ]
-     │
-     ├──> Charge dxgi.dll    ──> Mod LukeRoss REAL VR (OpenXR, Stéréoscopie, Fix DLSS)
-     │
-     └──> Charge dinput8.dll ──> ReShade 6.8 Add-on Build
-                                       │
-                                       └──> renodx-dlss5.addon64
-                                       └──> nvngx_dlssnr.dll (DLSS 5 Neural Engine)
-```
+### La Solution Hybride (Dual-Proxy C++ & Memory Patching)
+1. **Double Proxy `proxy/dxgi.dll`** : Intercepte les 23 exports système DXGI et s'intercale en toute transparence entre le jeu, LukeRoss (`RealVR64.dll`) et ReShade.
+2. **Débridage Mémoire Dynamique (Runtime Memory Uncap)** : Patche en RAM les verrous de la boucle d'évaluation RenoDX (`0x3CC0`, `0x40E0`, `0xDFF5`) pour garantir une reconstruction neuronale continue à 100% du framerate VR.
+3. **HUD In-Game Natif ("DLSS 5 <> VR")** :
+   - Rasterizer vectoriel haute netteté (GDI Segoe UI anti-aliasé, 480×220).
+   - **En VR** : Overlay OpenVR 3D immersif (positionnable en Top, Bottom, World ou Head).
+   - **Sur Bureau** : Fenêtre transparente ultra-légère (`layered window`).
+   - Pilote directement RenoDX et ReShade en mémoire vive sans bloquer les entrées du jeu.
 
 ---
 
-## Structure du Dépôt
+## Organisation du Répertoire
 
 ```
 vrdlss5/
-├── README.md                      # Ce fichier
-├── GUIDE_INTEGRATION_VR_DLSS5.md  # Étude technique complète & analyse architecturale
+├── proxy/                         # C++ Dual-Proxy (Composant cœur actif)
+│   ├── proxy.cpp                  # Code source C++ (Hooks DXGI, HUD Segoe UI, OpenVR, Patches RAM)
+│   ├── proxy.def                  # Définition des 23 exports DXGI
+│   ├── openvr.h / openvr_api.dll  # SDK & runtime OpenVR pour l'overlay VR natif
+│   ├── build.bat                  # Script de compilation MSVC en 1 clic
+│   ├── deploy.ps1                 # Script de déploiement vers le jeu
+│   └── README.md                  # Documentation technique du proxy
 │
-├── vr-dlss5-patch/                # Outil autonome écrit en Go (CLI d'automatisation)
+├── vr-dlss5-patch/                # CLI autonome en Go (Installateur automatisé)
 │   ├── main.go                    # Point d'entrée CLI
-│   ├── detector/                  # Analyse PE (64/32 bits, DLLs importées, détection LukeRoss/DLSS)
-│   ├── downloader/                # Téléchargement & cache (ReShade Addon, renodx, dlssnr)
-│   ├── installer/                 # Déploiement intelligent & configuration ReShade.ini
-│   ├── vr-dlss5-patch.exe         # Binaire compilé prêt à l'emploi
-│   └── README.md                  # Documentation spécifique à l'outil Go
+│   ├── detector/                  # Analyseur PE & détection automatique
+│   ├── downloader/                # Téléchargement automatique des composants DLSS 5 & ReShade
+│   ├── installer/                 # Déploiement et configuration des profils
+│   └── README.md                  # Documentation de l'outil Go
 │
-├── DLSS5oneclick/                 # Projet Rust amont DLSS 5 One-Click
-├── RealRepo/                      # Répertoire des profils de jeu LukeRoss REAL VR
-└── RealConfig.bat                 # Script de configuration officiel LukeRoss
+├── deps/                          # Dépendances binaires externes précompilées
+│   ├── renodx-dlss5.addon64       # Add-on RenoDX DLSS 5 Neural Reconstruction
+│   ├── cudart64_12.dll            # Runtime NVIDIA CUDA 12 pour nvngx_dlssnr.dll
+│   └── README.md                  # Description des dépendances
+│
+├── tools/                         # Boîte à outils Python & Scripts de diagnostic
+│   ├── diag.py                    # Diagnostic complet en temps réel (processus, hooks, RAM)
+│   ├── tail_log.py                # Moniteur de logs ReShade et LukeRoss en direct
+│   ├── patch_workset.py           # Analyseur de l'allocation mémoire RenoDX
+│   ├── analyze_eval.py            # Analyseur de boucle d'évaluation
+│   ├── audit/                     # Rapports d'audits, désassemblages et tables PE
+│   └── README.md                  # Guide d'utilisation des outils
+│
+├── RealRepo/                      # Répertoire officiel des profils LukeRoss REAL VR
+├── RealConfig.bat                 # Script de configuration officiel LukeRoss
+├── GUIDE_INTEGRATION_VR_DLSS5.md  # Guide pas-à-pas d'intégration
+├── REX_INTEGRATION_VR_DLSS5.md    # Rapport d'architecture détaillé et retour d'expérience
+└── README.md                      # Ce document
 ```
 
 ---
 
-## Démarrage Rapide avec `vr-dlss5-patch`
+## Compilation & Déploiement Rapide
 
-L'outil Go `vr-dlss5-patch.exe` automatise l'ensemble du processus : détection, téléchargement des fichiers requis, choix du proxy approprié et configuration.
+### 1. Compiler le Proxy C++
 
-### 1. Exemple : Patcher un jeu (ex: Avatar Frontiers of Pandora)
+Le script `proxy/build.bat` détecte automatiquement Visual Studio (BuildTools, Community, Professional ou Enterprise) et génère `dxgi.dll` sans polluer le dossier :
+
+```cmd
+cd proxy
+build.bat
+```
+
+### 2. Déployer sur votre jeu
+
+Déployez en une commande vers le dossier de votre jeu (ex: *Avatar: Frontiers of Pandora*) :
 
 ```powershell
-cd C:\code\vrdlss5\vr-dlss5-patch
-.\vr-dlss5-patch.exe "D:\Games\AFOP\afop.exe"
+cd proxy
+.\deploy.ps1 -GameDir "D:\Games\AFOP"
 ```
 
-L'outil va :
-1. Analyser l'exécutable `afop.exe` (architecture 64-bit, imports `DINPUT8.dll`, DX12, etc.).
-2. Détecter la présence du mod VR LukeRoss dans `dxgi.dll`.
-3. Conserver `dxgi.dll` intact pour préserver la VR.
-4. Télécharger et extraire ReShade 6.8 Addon, `renodx-dlss5.addon64` et `nvngx_dlssnr.dll`.
-5. Déployer ReShade en tant que **`dinput8.dll`**.
-6. Configurer `ReShade.ini` (`[RenoDX.DLSS5] NeuralUplift=1`).
+Pour forcer la fermeture du jeu s'il est déjà en cours d'exécution :
+```powershell
+.\deploy.ps1 -GameDir "D:\Games\AFOP" -ForceClose
+```
 
 ---
 
-## Commandes & Options
+## Contrôles In-Game (HUD & Raccourcis)
 
-| Commande | Description |
-| :--- | :--- |
-| `vr-dlss5-patch.exe <chemin>` | Analyse et installe le patch sur l'exécutable ou le dossier cible. |
-| `vr-dlss5-patch.exe -check <chemin>` | Diagnostic complet sans écrire ni modifier de fichier. |
-| `vr-dlss5-patch.exe -dry-run <chemin>` | Simule les étapes d'installation en affichant les actions prévues. |
-| `vr-dlss5-patch.exe -remove <chemin>` | Désinstalle proprement tous les fichiers déposés par le patch. |
-| `vr-dlss5-patch.exe -proxy <nom> <chemin>` | Force un nom de DLL proxy spécifique (ex: `dinput8.dll`, `d3d12.dll`). |
-| `vr-dlss5-patch.exe -cache-dir <dossier>` | Définit un répertoire de cache personnalisé pour les téléchargements. |
+Le menu **DLSS 5 <> VR** apparaît directement dans le casque VR et sur l'écran bureau :
 
-### Compilation depuis les sources
+| Action | Raccourci Manette VR | Raccourci Clavier |
+| :--- | :--- | :--- |
+| **Afficher / Masquer le HUD** | `Select / Back` + `L3` (Stick Click) | `Insert` |
+| **Basculer le DLSS 5 On / Off** | `Select` (dans le HUD) | `F6` |
+| **Navigation dans le menu** | `Croix directionnelle (D-Pad)` Haut / Bas | Flèches Haut / Bas |
+| **Changer la Position du HUD** | Navigation sur la ligne `HUD Pos` (`Top` / `Bottom` / `World` / `Head`) | Flèches Gauche / Droite |
+| **Ouvrir le menu ReShade** | — | `Home` |
+| **Menu Réglages LukeRoss VR** | Bouton dédié VR | `Pavé Numérique` |
+
+---
+
+## Outils & Diagnostics
+
+Pour vérifier le bon fonctionnement du proxy et des patches mémoire lorsque le jeu tourne :
 
 ```powershell
-cd vr-dlss5-patch
-go build -o vr-dlss5-patch.exe main.go
+# Diagnostic complet des hooks et de l'état mémoire
+python tools/diag.py
+
+# Suivi en temps réel des logs ReShade
+python tools/tail_log.py
 ```
 
 ---
 
-## Fonctionnement en Jeu
+## Documentation Complète
 
-1. Allumez votre casque VR (Meta Quest, Pimax, Valve Index, etc.) et lancez SteamVR ou le runtime OpenXR.
-2. Démarrez le jeu normalement via son lanceur ou son exécutable.
-3. Le jeu bascule dans le casque VR en 3D stéréoscopique.
-4. **Touches de contrôle** :
-   - **`[Home]`** : Ouvre l'interface ReShade. Dans l'onglet **Add-ons**, vérifiez la présence du panneau *DLSS 5 Neural Rendering*.
-   - **`[F6]`** : Raccourci direct pour activer / désactiver le Neural Rendering.
-   - **`[Pavé Numérique]`** : Menu de réglages caméra et confort du mod LukeRoss VR.
-
----
-
-## Documentation Détaillée
-
-Pour comprendre le fonctionnement bas niveau des hooks DirectX, de l'API NGX et de l'ordonnancement des appels stéréoscopiques, consultez :
-- [GUIDE_INTEGRATION_VR_DLSS5.md](GUIDE_INTEGRATION_VR_DLSS5.md) : Rapport d'analyse technique et guide de conception.
-- [vr-dlss5-patch/README.md](vr-dlss5-patch/README.md) : Documentation détaillée du sous-projet Go.
+Pour approfondir les mécanismes internes :
+- [GUIDE_INTEGRATION_VR_DLSS5.md](GUIDE_INTEGRATION_VR_DLSS5.md) : Guide de mise en œuvre étape par étape.
+- [REX_INTEGRATION_VR_DLSS5.md](REX_INTEGRATION_VR_DLSS5.md) : Rapport d'architecture, analyse des hooks DXGI, du modèle de threading et résolution des conflits.
+- [proxy/README.md](proxy/README.md) : Documentation technique du double proxy C++.
+- [tools/README.md](tools/README.md) : Documentation des outils Python et des fichiers d'audit.

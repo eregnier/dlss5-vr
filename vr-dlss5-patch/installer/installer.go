@@ -19,6 +19,7 @@ type InstallPlan struct {
 	ModelPath      string
 	BridgePath     string
 	DualProxyPath  string // Optionnel: chemin vers le proxy dxgi.dll C++ compilé (Architecture B)
+	CudartPath     string // Optionnel: cudart64_12.dll (CUDA 12 runtime)
 }
 
 // Install applique le patch dans le répertoire du jeu selon l'analyse GameInfo.
@@ -104,6 +105,20 @@ func Install(info *detector.GameInfo, plan *InstallPlan, dryRun bool) ([]string,
 		}
 		installedFiles = append(installedFiles, "nvngx_dlssnr.dll")
 		actions = append(actions, "Installé: nvngx_dlssnr.dll")
+	}
+
+	// 3b. Déploiement CUDA Runtime (cudart64_12.dll) si requis
+	if plan.CudartPath != "" {
+		destCudart := filepath.Join(gameDir, "cudart64_12.dll")
+		if dryRun {
+			actions = append(actions, "Copier cudart64_12.dll")
+		} else {
+			if err := copyFile(plan.CudartPath, destCudart); err != nil {
+				return nil, fmt.Errorf("erreur déploiement cudart64_12.dll: %w", err)
+			}
+			installedFiles = append(installedFiles, "cudart64_12.dll")
+			actions = append(actions, "Installé: cudart64_12.dll")
+		}
 	}
 
 	// 4. Déploiement Bridge DX11 si nécessaire

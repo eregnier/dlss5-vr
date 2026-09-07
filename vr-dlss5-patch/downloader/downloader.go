@@ -115,6 +115,19 @@ func (d *Downloader) GetDLSS5Addon() (string, error) {
 		return cached, nil
 	}
 
+	// Chercher dans deps/ local ou parent
+	depsCandidates := []string{
+		filepath.Join("deps", "renodx-dlss5.addon64"),
+		filepath.Join("..", "deps", "renodx-dlss5.addon64"),
+		`C:\code\vrdlss5\deps\renodx-dlss5.addon64`,
+	}
+	for _, c := range depsCandidates {
+		if fi, err := os.Stat(c); err == nil && fi.Size() > 100*1024 {
+			_ = copyFile(c, cached)
+			return cached, nil
+		}
+	}
+
 	// Chercher dans Downloads ou cache
 	if userDownloads := getUserDownloads(); userDownloads != "" {
 		matches, _ := filepath.Glob(filepath.Join(userDownloads, "*renodx-dlss5*"))
