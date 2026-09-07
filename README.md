@@ -11,30 +11,42 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 
 ## 🚀 Usage & How-To (Quick Start)
 
-### For End-Users & Players
+### For End-Users & Players (Binary Release Mode)
 
-1. **Download**: Grab the latest **`DLSS5-VR-Release.zip`** from the [GitHub Releases](../../releases) tab.
-2. **Extract**: Unzip the folder anywhere (e.g. `C:\tools\DLSS5-VR`).
-3. **Run**: Launch **`VR-DLSS5-Installer.exe`** (no dependencies needed, 0% bloat, native Win32).
+1. **Download**: Grab the latest **`DLSS5-VR-Release.zip`** from the [GitHub Releases](../../releases) page.
+2. **Extract**: Unzip the folder anywhere (e.g. `C:\tools\DLSS5-VR` or your Desktop).
+3. **Run**: Launch **`VR-DLSS5-Installer.exe`** (standalone native Win32 GUI, 0% bloat, zero dependencies).
 4. **Select Game**:
-   - Drag & drop your game executable onto the window, or click **Browse...** to select it (e.g. `Cyberpunk2077.exe`, `afop.exe`).
-   - *Note*: If you select an Unreal Engine launcher in the root folder, the installer automatically resolves the real target in `Binaries\Win64`.
-5. **Install**: Click **Install / Update DLSS 5**.
+   - Drag & drop your game executable onto the installer window, or click **Browse...** to select it (e.g. `Cyberpunk2077.exe`, `Outlaws.exe`, `HogwartsLegacy.exe`, `afop.exe`).
+   - *Tip*: If you select an Unreal Engine launcher in the root game folder, the installer automatically detects the real target in `Binaries\Win64`.
+5. **Install / Update**: Click **Install / Update DLSS 5**.
    - If missing, the ~160 MB neural model (`nvngx_dlssnr.dll`) will be downloaded automatically with live progress.
    - The installer creates an idempotent, safe swap of LukeRoss's `dxgi.dll` -> `RealVR64.dll`.
-6. **Play**: Launch your game normally with your VR headset connected!
-7. **Rollback**: To restore vanilla LukeRoss VR at any time, click **Restore Vanilla LukeRoss**.
+6. **Launch & Play**: Start your game normally with your VR headset connected!
+7. **Rollback**: To restore vanilla LukeRoss VR at any time, simply click **Restore Vanilla LukeRoss**.
+
+> [!TIP]
+> **Third-Party Launchers (Ubisoft Connect, EA App, etc.)**:
+> If a game (such as *Star Wars Outlaws*) fails to launch or crashes to desktop immediately after mod installation, exit the game and **completely close/restart your game launcher** (e.g. Ubisoft Connect). Launchers often cache DLL hooks from previous sessions until restarted.
 
 #### In-Game HUD & Controls
 
-| Action | VR Controller | Keyboard |
+The DLSS 5 <> VR HUD is rendered via OpenVR as a native 3D compositor overlay (fpsVR style) and mirrored to the desktop:
+
+| Action | Gamepad / VR Controller | Keyboard |
 | :--- | :--- | :--- |
-| **Toggle HUD On/Off** | `Select / Back` + `L3` (Stick Click) | `Insert` |
-| **Toggle DLSS 5 On/Off** | `Select` (in HUD) | `F6` |
-| **Menu Navigation** | `D-Pad Up / Down` | `Up / Down Arrows` |
-| **Adjust HUD Position** | Row `HUD Pos` (`Top` / `Bottom` / `World` / `Head`) | `Left / Right Arrows` |
+| **Toggle HUD Menu On/Off** | `Select / Back` + `L3` (Left Stick Click) | `F6` |
+| **Navigate Settings Rows** | `D-Pad Up / Down` | `Up / Down Arrows` |
+| **Adjust Values / Toggle Option** | `D-Pad Left / Right` | `Left / Right Arrows` (or `Space` / `Enter`) |
+| **Cycle HUD Position** | `Y` (Xbox) / `Triangle` (PS5) | `Tab` |
+| **Cycle HUD Scale** | `R3` (Right Stick Click) | `F7` |
+| **Close HUD** | `Select + L3` / Gamepad combo | `Escape` or `F6` |
 | **ReShade Overlay** | — | `Home` |
-| **LukeRoss VR Settings** | Dedicated VR button | `Numpad` |
+| **LukeRoss VR Mod Menu** | Dedicated VR Menu Button | `Numpad 0-9` |
+
+> [!NOTE]
+> **Smart D-Pad Isolation**:
+> When the HUD menu is active, D-Pad directional inputs are automatically intercepted and filtered out from the game engine via runtime XInput hooks. You can freely walk with the left analog stick, aim/look around with the right stick, jump, and shoot without accidentally triggering in-game D-pad consumables, potions, or quick inventory slots while adjusting DLSS 5 parameters. Once the menu is closed, D-Pad inputs are immediately restored to the game.
 
 ---
 
@@ -42,7 +54,7 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 
 ### High-Level Architecture
 
-The toolchain operates at the DirectX 12 and OpenVR boundaries:
+The toolchain operates at the DirectX 12, XInput, and OpenVR boundaries:
 
 ```mermaid
 graph TD
@@ -51,15 +63,20 @@ graph TD
     Proxy -->|Pre-loads without hook collisions| ReShade[ReShade 6.8+ 64-bit Engine]
     ReShade -->|Loads| RenoDX[renodx-dlss5.addon64]
     RenoDX -->|Invokes Neural Weights| Model[nvngx_dlssnr.dll<br/>DLSS 5 Model]
-    Proxy -->|Direct OpenVR / GDI Injection| HUD[In-Game 3D Overlay & HUD<br/>Segoe UI Vector Render]
-    Proxy -->|Exports 23 DXGI Symbols| DXGI[C:\Windows\System32\dxgi.dll]
+    Proxy -->|OpenVR Compositor Overlay + Event Pump| HUD[In-Game 3D Overlay & HUD<br/>Segoe UI Vector Render]
+    Proxy -->|MinHook XInput Detours| Input[Gamepad D-Pad Filter<br/>Game input masked during HUD]
+    Proxy -->|Exports 24 System Symbols| DXGI[C:\Windows\System32\dxgi.dll]
 ```
 
-#### Why a Dual-Proxy?
-1. **Hook Collision Prevention**: LukeRoss's `RealVR64.dll` hooks DXGI swapchain creation and OpenVR presents. Loading ReShade standard `.dll` directly causes initialization deadlocks.
-2. **Explicit Chaining**: Our `proxy/dxgi.dll` exports all 23 standard DXGI functions via [`proxy/proxy.def`](file:///C:/code/dlss5-vr/proxy/proxy.def), safely pre-loading ReShade in passive mode before forwarding control to `RealVR64.dll`.
-3. **Stereo Frame Reconstruction**: Intercepts `NVSDK_NGX_D3D12_EvaluateFeature` calls to prevent memory desynchronization across dual-eye render passes.
-4. **Zero Latency In-Game HUD**: Renders a vector-crisp Segoe UI overlay directly through OpenVR 3D overlays without introducing render pass latency.
+#### Key Architecture Components:
+1. **Hook Collision Prevention & Explicit Chaining**:
+   LukeRoss's `RealVR64.dll` hooks DXGI swapchain creation and OpenVR presents. Loading ReShade standard `.dll` directly causes initialization deadlocks. Our `proxy/dxgi.dll` exports standard DXGI and XInput functions, safely pre-loading ReShade in passive mode before forwarding control to `RealVR64.dll`.
+2. **Stereo Frame Reconstruction**:
+   Intercepts `NVSDK_NGX_D3D12_EvaluateFeature` calls to ensure continuous neural evaluation across dual-eye render passes.
+3. **OpenVR Compositor Overlay with Self-Healing Auto-Recovery**:
+   Renders a vector-crisp Segoe UI overlay directly through OpenVR (`IVROverlay::SetOverlayRaw`). Continuously drains the OpenVR IPC event queue via `PollNextOverlayEvent()` to prevent buffer saturation (OpenVR error 23 / `VROverlayError_RequestFailed`), and features automatic self-healing recovery that seamlessly recreates the overlay handle if SteamVR resets or enters standby.
+4. **MinHook D-Pad Isolation**:
+   Hooks `XInputGetState` (and ordinal 100 `XInputGetStateEx`) on all loaded modules (`RealVR64.dll`, local and system `XINPUT1_4.dll`, `XINPUT1_3.dll`, `XINPUT9_1_0.dll`, and `joyGetPosEx`). Thread-aware filtering guarantees that the HUD thread receives unmasked controller input while the game engine's D-Pad bits are masked only when the menu is open.
 
 ---
 
@@ -67,25 +84,24 @@ graph TD
 
 - **OS**: Windows 10/11 x64
 - **Compiler**: Visual Studio 2022 (MSVC `cl.exe` v143+ with C++17 support)
-  - Workload: *Desktop development with C++*
-  - Ensure `cl.exe` is available in your PATH or run commands from the **x64 Native Tools Command Prompt for VS 2022**.
+  - Workload: *Desktop development with C++* (Visual Studio Community or Build Tools)
 - **Optional**:
-  - Go 1.22+ (for `vr-dlss5-patch` headless CLI)
   - Python 3.10+ (for live debugging scripts in `tools/`)
+  - Go 1.22+ (for `vr-dlss5-patch` headless CLI)
 
 ---
 
 ### Compiling from Source
 
-#### 1. Build the Entire Release Package
-The easiest way to build everything and produce the distributable `.zip`:
+#### 1. Build the Entire Release Package (One-Click)
+The quickest way to compile all components and produce the distributable `.zip`:
 ```cmd
 cd C:\code\dlss5-vr
 package_release.bat
 ```
 Output will be generated in:
-- `dist/DLSS5-VR-Release/` (unpacked directory)
-- `dist/DLSS5-VR-Release.zip` (~3.8 MB standalone archive)
+- `dist/DLSS5-VR-Release/` (unpacked standalone folder)
+- `dist/DLSS5-VR-Release.zip` (portable distribution archive)
 
 ---
 
@@ -97,9 +113,9 @@ cd C:\code\dlss5-vr\proxy
 build.bat
 ```
 *Build details*:
-- Uses `/O2 /std:c++17 /LD /W3`.
-- Links `openvr_api.lib`, `d3d12.lib`, `dxgi.lib`, `gdi32.lib`, `user32.lib`.
-- Uses `proxy.def` for standard system export forwarding.
+- Compiles `proxy.cpp` and bundled MinHook engine (`minhook/src/`).
+- Links `user32.lib`, `gdi32.lib`, `winmm.lib`, `xinput.lib`.
+- Generates `dxgi.dll` with 24 exports defined in [`proxy.def`](file:///C:/code/dlss5-vr/proxy/proxy.def).
 
 ##### B. Build the Win32 GUI Installer (`installer/VR-DLSS5-Installer.exe`)
 ```cmd
@@ -107,9 +123,9 @@ cd C:\code\dlss5-vr\installer
 build.bat
 ```
 *Build details*:
-- Lightweight Win32 GUI subsystem (`/SUBSYSTEM:WINDOWS`).
+- Native Win32 GUI subsystem (`/SUBSYSTEM:WINDOWS`).
 - Zero external runtime dependencies.
-- Links `comctl32.lib` (v6 visual styles), `wininet.lib` (HTTP downloader & update checker), `shell32.lib` (drag & drop, file dialogs).
+- Links `comctl32.lib`, `wininet.lib`, `shell32.lib`, `shlwapi.lib`, `advapi32.lib`.
 
 ##### C. Build the Headless CLI (`vr-dlss5-patch`)
 ```cmd
@@ -121,21 +137,17 @@ go build -o vr-dlss5-patch.exe main.go
 
 ### Hot-Reload & Development Workflow
 
-To rapidly test proxy modifications without restarting the installer:
+To rapidly iterate and test proxy modifications without re-running the installer:
 1. Edit [`proxy/proxy.cpp`](file:///C:/code/dlss5-vr/proxy/proxy.cpp).
-2. Recompile and deploy directly into your game directory using PowerShell:
+2. Recompile and deploy directly into your game directory:
 ```powershell
 cd C:\code\dlss5-vr\proxy
 .\build.bat
-.\deploy.ps1 -GameDir "D:\Games\Avatar Frontiers of Pandora"
+.\deploy.ps1 -GameDir "C:\Program Files (x86)\Steam\steamapps\common\Star Wars Outlaws"
 ```
-3. Run live diagnostics to monitor hooking, eye evaluation, and FPS:
+3. Monitor logs in real-time:
 ```cmd
-python tools/diag.py --poll 1.0
-```
-4. Stream ReShade and LukeRoss logs in real time:
-```cmd
-python tools/tail_log.py --game-dir "D:\Games\Avatar Frontiers of Pandora"
+python tools/tail_log.py --game-dir "C:\Program Files (x86)\Steam\steamapps\common\Star Wars Outlaws"
 ```
 
 ---
@@ -150,15 +162,16 @@ dlss5-vr/
 │   └── README.md                  # Installer architecture & swap mechanics
 │
 ├── proxy/                         # C++ Dual-Proxy (Core Runtime Component)
-│   ├── proxy.cpp                  # DXGI hooks, OpenVR HUD, GDI Segoe UI, D3D12 uncap
-│   ├── proxy.def                  # 23 DXGI standard exports
+│   ├── proxy.cpp                  # DXGI hooks, OpenVR HUD, MinHook D-Pad filter, GDI Segoe UI
+│   ├── proxy.def                  # 24 standard exports (DXGI + NGX + XInputGetState)
+│   ├── minhook/                   # Bundled lightweight MinHook API hook engine
 │   ├── openvr.h / openvr_api.dll  # Valve OpenVR SDK headers & 64-bit runtime
 │   ├── build.bat                  # MSVC compile script -> dxgi.dll
 │   ├── deploy.ps1                 # Fast hot-deploy PowerShell script
 │   └── README.md                  # Proxy internals & thread model
 │
 ├── deps/                          # Redistributable Helper Binaries
-│   ├── ReShade64_dlss5.dll         # ReShade 6.8+ with neutralized OpenVR hooks
+│   ├── ReShade64_dlss5.dll        # ReShade 6.8+ with neutralized OpenVR hooks
 │   ├── renodx-dlss5.addon64       # RenoDX DLSS 5 add-on
 │   ├── cudart64_12.dll            # NVIDIA CUDA 12 runtime
 │   └── README.md
@@ -179,6 +192,7 @@ dlss5-vr/
 ├── LICENSE                        # MIT License + Third-Party Notices
 └── README.md                      # This document
 ```
+
 
 ---
 
