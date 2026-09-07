@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <math.h>
 #include "font8x14.h"
+#define OPENVR_BUILD_STATIC
 #include "openvr.h"
 
 #pragma comment(lib, "d3d12.lib")
@@ -15,7 +16,6 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "openvr_api.lib")
 
 typedef HRESULT (WINAPI *PFN_CreateDXGIFactory)(REFIID riid, void **ppFactory);
 typedef HRESULT (WINAPI *PFN_CreateDXGIFactory1)(REFIID riid, void **ppFactory);
@@ -551,6 +551,106 @@ static void RenderHUD(bool masterEnable, float intensity, float tone, int preset
 
 
 // ----------------------------------------------------------------------------
+// Dynamic OpenVR API Loader (Zero Static Dependency, Zero Loader Lock Deadlock)
+// ----------------------------------------------------------------------------
+typedef uint32_t (VR_CALLTYPE *PFN_VR_InitInternal2)(vr::EVRInitError *peError, vr::EVRApplicationType eApplicationType, const char *pStartupInfo);
+typedef void (VR_CALLTYPE *PFN_VR_ShutdownInternal)();
+typedef void* (VR_CALLTYPE *PFN_VR_GetGenericInterface)(const char *pchInterfaceVersion, vr::EVRInitError *peError);
+typedef bool (VR_CALLTYPE *PFN_VR_IsInterfaceVersionValid)(const char *pchInterfaceVersion);
+typedef const char* (VR_CALLTYPE *PFN_VR_GetVRInitErrorAsEnglishDescription)(vr::EVRInitError error);
+typedef uint32_t (VR_CALLTYPE *PFN_VR_GetInitToken)();
+
+static HMODULE g_hOpenVRDll = NULL;
+static PFN_VR_InitInternal2 s_pfnVR_InitInternal2 = NULL;
+static PFN_VR_ShutdownInternal s_pfnVR_ShutdownInternal = NULL;
+static PFN_VR_GetGenericInterface s_pfnVR_GetGenericInterface = NULL;
+static PFN_VR_IsInterfaceVersionValid s_pfnVR_IsInterfaceVersionValid = NULL;
+static PFN_VR_GetVRInitErrorAsEnglishDescription s_pfnVR_GetVRInitErrorAsEnglishDescription = NULL;
+static PFN_VR_GetInitToken s_pfnVR_GetInitToken = NULL;
+
+static bool LoadOpenVRAPI()
+{
+    if (g_hOpenVRDll) return true;
+
+    // 1. Essayer dans le dossier du jeu en cours
+    char path[MAX_PATH];
+    if (GetModuleFileNameA(NULL, path, MAX_PATH)) {
+        char* slash = strrchr(path, '\\');
+        if (slash) {
+            *(slash + 1) = '\0';
+            strcat_s(path, MAX_PATH, "openvr_api.dll");
+            g_hOpenVRDll = LoadLibraryA(path);
+        }
+    }
+    // 2. Repli standard
+    if (!g_hOpenVRDll) {
+        g_hOpenVRDll = LoadLibraryA("openvr_api.dll");
+    }
+    if (!g_hOpenVRDll) {
+        LogMsg("[OpenVR-Dynamic] WARNING: openvr_api.dll could not be loaded");
+        return false;
+    }
+
+    s_pfnVR_InitInternal2 = (PFN_VR_InitInternal2)GetProcAddress(g_hOpenVRDll, "VR_InitInternal2");
+    s_pfnVR_ShutdownInternal = (PFN_VR_ShutdownInternal)GetProcAddress(g_hOpenVRDll, "VR_ShutdownInternal");
+    s_pfnVR_GetGenericInterface = (PFN_VR_GetGenericInterface)GetProcAddress(g_hOpenVRDll, "VR_GetGenericInterface");
+    s_pfnVR_IsInterfaceVersionValid = (PFN_VR_IsInterfaceVersionValid)GetProcAddress(g_hOpenVRDll, "VR_IsInterfaceVersionValid");
+    s_pfnVR_GetVRInitErrorAsEnglishDescription = (PFN_VR_GetVRInitErrorAsEnglishDescription)GetProcAddress(g_hOpenVRDll, "VR_GetVRInitErrorAsEnglishDescription");
+    s_pfnVR_GetInitToken = (PFN_VR_GetInitToken)GetProcAddress(g_hOpenVRDll, "VR_GetInitToken");
+
+    bool ok = (s_pfnVR_InitInternal2 && s_pfnVR_GetGenericInterface && s_pfnVR_IsInterfaceVersionValid);
+    if (ok) {
+        LogMsg("[OpenVR-Dynamic] openvr_api.dll dynamically resolved successfully!");
+    } else {
+        LogMsg("[OpenVR-Dynamic] ERROR: Failed to resolve OpenVR core entry points");
+    }
+    return ok;
+}
+
+namespace vr {
+uint32_t VR_CALLTYPE VR_InitInternal2(EVRInitError *peError, EVRApplicationType eApplicationType, const char *pStartupInfo)
+{
+    if (!LoadOpenVRAPI() || !s_pfnVR_InitInternal2) {
+        if (peError) *peError = VRInitError_Init_FileNotFound;
+        return 0;
+    }
+    return s_pfnVR_InitInternal2(peError, eApplicationType, pStartupInfo);
+}
+
+void VR_CALLTYPE VR_ShutdownInternal()
+{
+    if (s_pfnVR_ShutdownInternal) s_pfnVR_ShutdownInternal();
+}
+
+void* VR_CALLTYPE VR_GetGenericInterface(const char *pchInterfaceVersion, EVRInitError *peError)
+{
+    if (!LoadOpenVRAPI() || !s_pfnVR_GetGenericInterface) {
+        if (peError) *peError = VRInitError_Init_InterfaceNotFound;
+        return nullptr;
+    }
+    return s_pfnVR_GetGenericInterface(pchInterfaceVersion, peError);
+}
+
+bool VR_CALLTYPE VR_IsInterfaceVersionValid(const char *pchInterfaceVersion)
+{
+    if (!LoadOpenVRAPI() || !s_pfnVR_IsInterfaceVersionValid) return false;
+    return s_pfnVR_IsInterfaceVersionValid(pchInterfaceVersion);
+}
+
+const char* VR_CALLTYPE VR_GetVRInitErrorAsEnglishDescription(EVRInitError error)
+{
+    if (s_pfnVR_GetVRInitErrorAsEnglishDescription) return s_pfnVR_GetVRInitErrorAsEnglishDescription(error);
+    return "OpenVR error";
+}
+
+uint32_t VR_CALLTYPE VR_GetInitToken()
+{
+    if (s_pfnVR_GetInitToken) return s_pfnVR_GetInitToken();
+    return 0;
+}
+}
+
+// ----------------------------------------------------------------------------
 // OpenVR SteamVR Native Compositor Overlay (fpsVR Architecture)
 // Zero-Crash, 100% Decoupled from Game Engine & D3D12 Pipeline
 // ----------------------------------------------------------------------------
@@ -561,6 +661,12 @@ static uint64_t g_lastOpenVRInitAttempt = 0;
 
 static bool EnsureOpenVROverlay()
 {
+    // 0. Protection absolue anti-blocage au splashscreen / Ubisoft Connect :
+    // Ne jamais tenter d'initialiser OpenVR tant que le moteur 3D n'évalue pas de frames
+    if (g_evalFrameCounter < 5 && !g_hudVisible) {
+        return false;
+    }
+
     if (g_openvrInitialized && g_pVROverlay && g_hVROverlay != vr::k_ulOverlayHandleInvalid) {
         return true;
     }
@@ -1102,9 +1208,6 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
 {
     LogMsg("[Proxy] Input Watcher Thread started.");
 
-    // Tenter la connexion immédiate à SteamVR Overlay
-    EnsureOpenVROverlay();
-
     HDC hdc = GetDC(NULL);
     if (hdc) {
         int vRef = GetDeviceCaps(hdc, VREFRESH);
@@ -1121,7 +1224,7 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         // 1. Initialiser paresseusement les variables au premier lancement
         InitVariablesFromAddonOrIni();
 
-        // 2. Maintenir la connexion OpenVR active
+        // 2. Maintenir la connexion OpenVR active (protégé contre le splashscreen)
         EnsureOpenVROverlay();
 
         // 3. Écouter les entrées clavier (F6) et manettes (Select+L3)
