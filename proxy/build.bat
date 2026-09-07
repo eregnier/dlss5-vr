@@ -30,13 +30,13 @@ echo [INFO] Initializing MSVC x64 environment...
 call "%VCVARS%" >nul 2>&1
 
 :compile
-echo [INFO] Compiling proxy.cpp -> dxgi.dll...
-cl /O2 /LD /std:c++17 /EHsc proxy.cpp /link /DEF:proxy.def /OUT:dxgi.dll user32.lib gdi32.lib
+echo [INFO] Compiling proxy.cpp + minhook -> dxgi.dll...
+cl /O2 /LD /std:c++17 /EHsc /I minhook/include proxy.cpp minhook/src/buffer.c minhook/src/hook.c minhook/src/trampoline.c minhook/src/hde/hde64.c /link /DEF:proxy.def /OUT:dxgi.dll user32.lib gdi32.lib winmm.lib xinput.lib
 
 if %ERRORLEVEL% equ 0 (
     echo.
     echo [SUCCESS] dxgi.dll built successfully!
-    del proxy.obj dxgi.exp proxy.exp proxy.lib >nul 2>&1
+    del *.obj dxgi.exp proxy.exp proxy.lib >nul 2>&1
 ) else (
     echo.
     echo [FAILED] Compilation failed with error %ERRORLEVEL%.

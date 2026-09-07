@@ -9,6 +9,7 @@
 #include <math.h>
 #define OPENVR_BUILD_STATIC
 #include "openvr.h"
+#include "MinHook.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "xinput.lib")
@@ -72,7 +73,170 @@ static void LogMsg(const char *msg)
     }
 }
 
+static bool g_hudVisible = false;
+static DWORD g_inputWatcherThreadId = 0;
 static DWORD WINAPI InputWatcherThread(LPVOID lpParam);
+
+// ----------------------------------------------------------------------------
+// XInput & Gamepad Interception: D-Pad Masking during HUD Navigation
+// Blocks D-pad forwarding to game engine while preserving movement & camera sticks
+// ----------------------------------------------------------------------------
+typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD dwUserIndex, XINPUT_STATE* pState);
+typedef MMRESULT (WINAPI *PFN_joyGetPosEx)(UINT uJoyID, LPJOYINFOEX pji);
+
+static PFN_XInputGetState g_origXInput1_4_GetState = NULL;
+static PFN_XInputGetState g_origXInput1_4_Ex = NULL;
+static PFN_XInputGetState g_origXInput1_3_GetState = NULL;
+static PFN_XInputGetState g_origXInput9_1_0_GetState = NULL;
+static PFN_XInputGetState g_origRealVR_GetState = NULL;
+static PFN_joyGetPosEx g_origJoyGetPosEx = NULL;
+
+static inline DWORD FilterXInputState(DWORD dwUserIndex, XINPUT_STATE* pState, DWORD result)
+{
+    // If called from our own InputWatcherThread, NEVER mask so that HUD can be navigated freely
+    if (GetCurrentThreadId() == g_inputWatcherThreadId) {
+        return result;
+    }
+
+    // When the VR HUD is visible, mask out ONLY the D-pad bits (0x000F)
+    // Up (0x0001), Down (0x0002), Left (0x0004), Right (0x0008)
+    // Movement sticks, camera stick, face buttons, bumpers, triggers remain 100% active in-game
+    if (result == ERROR_SUCCESS && pState && g_hudVisible) {
+        pState->Gamepad.wButtons &= ~(XINPUT_GAMEPAD_DPAD_UP | 
+                                      XINPUT_GAMEPAD_DPAD_DOWN | 
+                                      XINPUT_GAMEPAD_DPAD_LEFT | 
+                                      XINPUT_GAMEPAD_DPAD_RIGHT);
+    }
+    return result;
+}
+
+static DWORD WINAPI Hooked_XInput1_4_GetState(DWORD dwUserIndex, XINPUT_STATE* pState)
+{
+    DWORD res = g_origXInput1_4_GetState ? g_origXInput1_4_GetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
+    return FilterXInputState(dwUserIndex, pState, res);
+}
+
+static DWORD WINAPI Hooked_XInput1_4_Ex(DWORD dwUserIndex, XINPUT_STATE* pState)
+{
+    DWORD res = g_origXInput1_4_Ex ? g_origXInput1_4_Ex(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
+    return FilterXInputState(dwUserIndex, pState, res);
+}
+
+static DWORD WINAPI Hooked_XInput1_3_GetState(DWORD dwUserIndex, XINPUT_STATE* pState)
+{
+    DWORD res = g_origXInput1_3_GetState ? g_origXInput1_3_GetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
+    return FilterXInputState(dwUserIndex, pState, res);
+}
+
+static DWORD WINAPI Hooked_XInput9_1_0_GetState(DWORD dwUserIndex, XINPUT_STATE* pState)
+{
+    DWORD res = g_origXInput9_1_0_GetState ? g_origXInput9_1_0_GetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
+    return FilterXInputState(dwUserIndex, pState, res);
+}
+
+static DWORD WINAPI Hooked_RealVR_GetState(DWORD dwUserIndex, XINPUT_STATE* pState)
+{
+    DWORD res = g_origRealVR_GetState ? g_origRealVR_GetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
+    return FilterXInputState(dwUserIndex, pState, res);
+}
+
+static MMRESULT WINAPI Hooked_joyGetPosEx(UINT uJoyID, LPJOYINFOEX pji)
+{
+    MMRESULT res = g_origJoyGetPosEx ? g_origJoyGetPosEx(uJoyID, pji) : JOYERR_PARMS;
+    if (GetCurrentThreadId() == g_inputWatcherThreadId) return res;
+    if (res == JOYERR_NOERROR && pji && g_hudVisible) {
+        pji->dwPOV = JOY_POVCENTERED; // 0xFFFF = neutral POV hat (D-pad centered)
+    }
+    return res;
+}
+
+static void InstallXInputHooks()
+{
+    static bool s_minHookInited = false;
+    if (!s_minHookInited) {
+        MH_STATUS st = MH_Initialize();
+        if (st == MH_OK || st == MH_ERROR_ALREADY_INITIALIZED) {
+            s_minHookInited = true;
+            LogMsg("[Proxy-Input] MinHook engine initialized successfully");
+        } else {
+            char buf[128];
+            sprintf_s(buf, sizeof(buf), "[Proxy-Input] MinHook init error: %d", st);
+            LogMsg(buf);
+            return;
+        }
+    }
+
+    // 1. Hook RealVR64.dll's XInputGetState if present
+    if (g_hRealVR && !g_origRealVR_GetState) {
+        void* pTarget = (void*)GetProcAddress(g_hRealVR, "XInputGetState");
+        if (pTarget) {
+            if (MH_CreateHook(pTarget, (LPVOID)&Hooked_RealVR_GetState, (LPVOID*)&g_origRealVR_GetState) == MH_OK) {
+                MH_EnableHook(pTarget);
+                LogMsg("[Proxy-Input] Hooked RealVR64.dll!XInputGetState (D-Pad filter armed)");
+            }
+        }
+    }
+
+    // 2. Hook XINPUT1_4.dll (local game directory or system)
+    HMODULE hX14 = GetModuleHandleA("XINPUT1_4.dll");
+    if (!hX14) hX14 = LoadLibraryA("XINPUT1_4.dll");
+    if (hX14) {
+        if (!g_origXInput1_4_GetState) {
+            void* pTarget = (void*)GetProcAddress(hX14, "XInputGetState");
+            if (pTarget) {
+                if (MH_CreateHook(pTarget, (LPVOID)&Hooked_XInput1_4_GetState, (LPVOID*)&g_origXInput1_4_GetState) == MH_OK) {
+                    MH_EnableHook(pTarget);
+                    LogMsg("[Proxy-Input] Hooked XINPUT1_4.dll!XInputGetState (D-Pad filter armed)");
+                }
+            }
+        }
+        if (!g_origXInput1_4_Ex) {
+            void* pEx = (void*)GetProcAddress(hX14, (LPCSTR)100);
+            if (pEx && pEx != (void*)g_origXInput1_4_GetState) {
+                if (MH_CreateHook(pEx, (LPVOID)&Hooked_XInput1_4_Ex, (LPVOID*)&g_origXInput1_4_Ex) == MH_OK) {
+                    MH_EnableHook(pEx);
+                    LogMsg("[Proxy-Input] Hooked XINPUT1_4.dll!XInputGetStateEx (ordinal 100 armed)");
+                }
+            }
+        }
+    }
+
+    // 3. Hook XINPUT1_3.dll if loaded
+    HMODULE hX13 = GetModuleHandleA("XINPUT1_3.dll");
+    if (hX13 && !g_origXInput1_3_GetState) {
+        void* pTarget = (void*)GetProcAddress(hX13, "XInputGetState");
+        if (pTarget) {
+            if (MH_CreateHook(pTarget, (LPVOID)&Hooked_XInput1_3_GetState, (LPVOID*)&g_origXInput1_3_GetState) == MH_OK) {
+                MH_EnableHook(pTarget);
+                LogMsg("[Proxy-Input] Hooked XINPUT1_3.dll!XInputGetState (D-Pad filter armed)");
+            }
+        }
+    }
+
+    // 4. Hook XINPUT9_1_0.dll if loaded
+    HMODULE hX9 = GetModuleHandleA("XINPUT9_1_0.dll");
+    if (hX9 && !g_origXInput9_1_0_GetState) {
+        void* pTarget = (void*)GetProcAddress(hX9, "XInputGetState");
+        if (pTarget) {
+            if (MH_CreateHook(pTarget, (LPVOID)&Hooked_XInput9_1_0_GetState, (LPVOID*)&g_origXInput9_1_0_GetState) == MH_OK) {
+                MH_EnableHook(pTarget);
+                LogMsg("[Proxy-Input] Hooked XINPUT9_1_0.dll!XInputGetState (D-Pad filter armed)");
+            }
+        }
+    }
+
+    // 5. Hook joyGetPosEx in winmm.dll
+    HMODULE hWinmm = GetModuleHandleA("winmm.dll");
+    if (hWinmm && !g_origJoyGetPosEx) {
+        void* pTarget = (void*)GetProcAddress(hWinmm, "joyGetPosEx");
+        if (pTarget) {
+            if (MH_CreateHook(pTarget, (LPVOID)&Hooked_joyGetPosEx, (LPVOID*)&g_origJoyGetPosEx) == MH_OK) {
+                MH_EnableHook(pTarget);
+                LogMsg("[Proxy-Input] Hooked winmm.dll!joyGetPosEx (POV hat neutralizer armed)");
+            }
+        }
+    }
+}
 
 static void InitProxy()
 {
@@ -130,8 +294,11 @@ static void InitProxy()
         if (!g_pfnDXGIGetDebugInterface1) g_pfnDXGIGetDebugInterface1 = (PFN_DXGIGetDebugInterface1)GetProcAddress(g_hSysDxgi, "DXGIGetDebugInterface1");
     }
 
-    // 4. Lancer le thread d'écoute autonome pour F6 et Select+L3
-    CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InputWatcherThread, NULL, 0, NULL);
+    // 4. Installer les hooks d'interception D-Pad (MinHook)
+    InstallXInputHooks();
+
+    // 5. Lancer le thread d'écoute autonome pour F6 et Select+L3
+    CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InputWatcherThread, NULL, 0, &g_inputWatcherThreadId);
 
     LogMsg("[Proxy] Proxy ready (Autonomous Input Thread armed).");
 }
@@ -269,7 +436,6 @@ static uintptr_t g_renodxBase = 0;
 static bool g_varsInitialized = false;
 
 // HUD State
-static bool g_hudVisible = false;
 static bool g_hudDirty = true;
 static bool g_masterEnable = true;
 static float g_nrIntensity = 2.50f;
@@ -826,6 +992,47 @@ static vr::VROverlayHandle_t g_hVROverlay = vr::k_ulOverlayHandleInvalid;
 static bool g_openvrInitialized = false;
 static uint64_t g_lastOpenVRInitAttempt = 0;
 
+static void ApplyOverlayTransformAndScale()
+{
+    if (!g_pVROverlay || g_hVROverlay == vr::k_ulOverlayHandleInvalid) return;
+
+    // Finer, more compact physical size in VR for high-DPI Pimax / Quest 3
+    float widthInMeters = 0.22f;
+    if (g_hudScale == 0) widthInMeters = 0.22f;      // 1.0x Compact / Pimax
+    else if (g_hudScale == 1) widthInMeters = 0.28f; // 1.5x Balanced
+    else if (g_hudScale == 2) widthInMeters = 0.36f; // 2.0x Comfort
+    g_pVROverlay->SetOverlayWidthInMeters(g_hVROverlay, widthInMeters);
+
+    float posX = 0.0f;
+    float posY = -0.22f; // Sweet spot bas (fpsVR / dashboard)
+    float posZ = -0.75f; // 75 cm distance
+
+    switch (g_hudPosIndex % 4) {
+    case 0: // Bottom-Center
+        posX = 0.0f; posY = -0.22f; posZ = -0.75f;
+        break;
+    case 1: // Top-Center
+        posX = 0.0f; posY = +0.20f; posZ = -0.75f;
+        break;
+    case 2: // Top-Right
+        posX = +0.26f; posY = +0.16f; posZ = -0.75f;
+        break;
+    case 3: // Top-Left
+        posX = -0.26f; posY = +0.16f; posZ = -0.75f;
+        break;
+    }
+
+    vr::HmdMatrix34_t mat = {};
+    mat.m[0][0] = 1.0f;
+    mat.m[1][1] = 1.0f;
+    mat.m[2][2] = 1.0f;
+    mat.m[0][3] = posX;
+    mat.m[1][3] = posY;
+    mat.m[2][3] = posZ;
+
+    g_pVROverlay->SetOverlayTransformTrackedDeviceRelative(g_hVROverlay, vr::k_unTrackedDeviceIndex_Hmd, &mat);
+}
+
 static bool EnsureOpenVROverlay()
 {
     // If already connected and overlay handle is valid, we are ready!
@@ -842,13 +1049,13 @@ static bool EnsureOpenVROverlay()
         return false;
     }
 
-    uint64_t now = GetTickCount64();
-    if (now - g_lastOpenVRInitAttempt < 2000) {
-        return false;
-    }
-    g_lastOpenVRInitAttempt = now;
-
     if (!g_openvrInitialized) {
+        uint64_t now = GetTickCount64();
+        if (now - g_lastOpenVRInitAttempt < 2000) {
+            return false;
+        }
+        g_lastOpenVRInitAttempt = now;
+
         vr::EVRInitError err = vr::VRInitError_None;
         vr::IVRSystem* pSys = vr::VR_Init(&err, vr::VRApplication_Overlay);
         if (err != vr::VRInitError_None || !pSys) {
@@ -889,6 +1096,7 @@ static bool EnsureOpenVROverlay()
             return false;
         }
         g_pVROverlay->SetOverlayAlpha(g_hVROverlay, 0.96f);
+        ApplyOverlayTransformAndScale();
         LogMsg("[OpenVR-Overlay] SteamVR Overlay created and armed successfully!");
     }
 
@@ -898,6 +1106,8 @@ static bool EnsureOpenVROverlay()
 static void UpdateOpenVROverlay(bool visible, bool isDirty)
 {
     static bool s_lastVisible = false;
+    static int s_lastScale = -1;
+    static int s_lastPos = -1;
 
     if (!visible) {
         if (s_lastVisible) {
@@ -919,55 +1129,38 @@ static void UpdateOpenVROverlay(bool visible, bool isDirty)
         isDirty = true; // Force fresh texture upload on reveal!
     }
 
-    static int s_lastScale = -1;
-    static int s_lastPos = -1;
-    if (s_lastScale != g_hudScale || s_lastPos != g_hudPosIndex || isDirty) {
+    if (s_lastScale != g_hudScale || s_lastPos != g_hudPosIndex) {
         s_lastScale = g_hudScale;
         s_lastPos = g_hudPosIndex;
-
-        // Finer, more compact physical size in VR for high-DPI Pimax / Quest 3
-        float widthInMeters = 0.22f;
-        if (g_hudScale == 0) widthInMeters = 0.22f;      // 1.0x Compact / Pimax
-        else if (g_hudScale == 1) widthInMeters = 0.28f; // 1.5x Balanced
-        else if (g_hudScale == 2) widthInMeters = 0.36f; // 2.0x Comfort
-        g_pVROverlay->SetOverlayWidthInMeters(g_hVROverlay, widthInMeters);
-
-        float posX = 0.0f;
-        float posY = -0.22f; // Sweet spot bas (fpsVR / dashboard)
-        float posZ = -0.75f; // 75 cm distance
-
-        switch (g_hudPosIndex % 4) {
-        case 0: // Bottom-Center
-            posX = 0.0f; posY = -0.22f; posZ = -0.75f;
-            break;
-        case 1: // Top-Center
-            posX = 0.0f; posY = +0.20f; posZ = -0.75f;
-            break;
-        case 2: // Top-Right
-            posX = +0.26f; posY = +0.16f; posZ = -0.75f;
-            break;
-        case 3: // Top-Left
-            posX = -0.26f; posY = +0.16f; posZ = -0.75f;
-            break;
-        }
-
-        vr::HmdMatrix34_t mat = {};
-        mat.m[0][0] = 1.0f;
-        mat.m[1][1] = 1.0f;
-        mat.m[2][2] = 1.0f;
-        mat.m[0][3] = posX;
-        mat.m[1][3] = posY;
-        mat.m[2][3] = posZ;
-
-        g_pVROverlay->SetOverlayTransformTrackedDeviceRelative(g_hVROverlay, vr::k_unTrackedDeviceIndex_Hmd, &mat);
+        ApplyOverlayTransformAndScale();
     }
 
     if (isDirty) {
         vr::EVROverlayError ovrErr = g_pVROverlay->SetOverlayRaw(g_hVROverlay, s_hudPixelsVR, HUD_WIDTH, HUD_HEIGHT, 4);
         if (ovrErr != vr::VROverlayError_None) {
             char buf[128];
-            sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] SetOverlayRaw error: %d", ovrErr);
+            sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] SetOverlayRaw error: %d - initiating self-healing recovery...", ovrErr);
             LogMsg(buf);
+
+            // Self-healing recovery: destroy and recreate overlay handle
+            g_pVROverlay->DestroyOverlay(g_hVROverlay);
+            g_hVROverlay = vr::k_ulOverlayHandleInvalid;
+            s_lastVisible = false;
+            s_lastScale = -1;
+            s_lastPos = -1;
+
+            if (EnsureOpenVROverlay()) {
+                g_pVROverlay->ShowOverlay(g_hVROverlay);
+                s_lastVisible = true;
+                ApplyOverlayTransformAndScale();
+                vr::EVROverlayError retryErr = g_pVROverlay->SetOverlayRaw(g_hVROverlay, s_hudPixelsVR, HUD_WIDTH, HUD_HEIGHT, 4);
+                if (retryErr == vr::VROverlayError_None) {
+                    LogMsg("[OpenVR-Overlay] Self-healing recovery successful: texture re-uploaded!");
+                } else {
+                    sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] Recovery retry error: %d", retryErr);
+                    LogMsg(buf);
+                }
+            }
         }
     }
 }
@@ -1030,7 +1223,15 @@ static void PollInput()
     ZeroMemory(&xstate, sizeof(XINPUT_STATE));
     bool xinputConnected = false;
     for (DWORD i = 0; i < 4; i++) {
-        if (XInputGetState(i, &xstate) == ERROR_SUCCESS) {
+        DWORD res = ERROR_DEVICE_NOT_CONNECTED;
+        if (g_origRealVR_GetState) {
+            res = g_origRealVR_GetState(i, &xstate);
+        } else if (g_origXInput1_4_GetState) {
+            res = g_origXInput1_4_GetState(i, &xstate);
+        } else {
+            res = XInputGetState(i, &xstate);
+        }
+        if (res == ERROR_SUCCESS) {
             xinputConnected = true;
             break;
         }
@@ -1044,7 +1245,8 @@ static void PollInput()
     jie.dwFlags = JOY_RETURNALL;
     bool dinputConnected = false;
     for (UINT j = 0; j < 4; j++) {
-        if (joyGetPosEx(j, &jie) == JOYERR_NOERROR) {
+        MMRESULT jres = g_origJoyGetPosEx ? g_origJoyGetPosEx(j, &jie) : joyGetPosEx(j, &jie);
+        if (jres == JOYERR_NOERROR) {
             dinputConnected = true;
             break;
         }
@@ -1415,8 +1617,29 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         // 1. Initialiser paresseusement les variables au premier lancement
         InitVariablesFromAddonOrIni();
 
-        // 2. Maintenir la connexion OpenVR active (protégé contre le splashscreen)
+        // 2. Maintenir la connexion OpenVR active et purger la file IPC d'événements (anti-saturation erreur 23)
         EnsureOpenVROverlay();
+        if (g_pVROverlay && g_hVROverlay != vr::k_ulOverlayHandleInvalid) {
+            vr::VREvent_t vrEvent;
+            while (g_pVROverlay->PollNextOverlayEvent(g_hVROverlay, &vrEvent, sizeof(vrEvent))) {
+                if (vrEvent.eventType == vr::VREvent_Quit || vrEvent.eventType == vr::VREvent_ProcessQuit) {
+                    LogMsg("[OpenVR-Overlay] SteamVR quit event detected, resetting overlay connection");
+                    g_pVROverlay = NULL;
+                    g_hVROverlay = vr::k_ulOverlayHandleInvalid;
+                    g_openvrInitialized = false;
+                    break;
+                }
+            }
+        }
+
+        // Intercepter dynamiquement de nouveaux modules XInput si charges tardivement
+        static uint64_t s_lastHookCheck = 0;
+        static int s_hookChecks = 0;
+        if (s_hookChecks < 10 && (now - s_lastHookCheck >= 1000)) {
+            s_lastHookCheck = now;
+            s_hookChecks++;
+            InstallXInputHooks();
+        }
 
         // 3. Écouter les entrées clavier (F6) et manettes (Select+L3)
         PollInput();
@@ -1522,5 +1745,20 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_ReleaseFeature(void* pHandle)
     return 1;
 }
 
+DWORD WINAPI Proxy_XInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState)
+{
+    InitProxy();
+    DWORD res = ERROR_DEVICE_NOT_CONNECTED;
+    if (g_origRealVR_GetState) {
+        res = g_origRealVR_GetState(dwUserIndex, pState);
+    } else if (g_origXInput1_4_GetState) {
+        res = g_origXInput1_4_GetState(dwUserIndex, pState);
+    } else {
+        res = XInputGetState(dwUserIndex, pState);
+    }
+    return FilterXInputState(dwUserIndex, pState, res);
 }
+
+}
+
 
