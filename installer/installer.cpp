@@ -657,12 +657,16 @@ void DoInstall()
         }
     }
 
-    // Step 3: Configure ReShade.ini
+    // Step 3: Configure ReShade.ini with optimal VR parameters
     wchar_t iniPath[MAX_PATH];
     PathCombineW(iniPath, g_targetDir.c_str(), L"ReShade.ini");
     WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NeuralUplift", L"1", iniPath);
-    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NRPreset", L"2", iniPath);
-    AppendLog(L"[CONFIG] Configured ReShade.ini: [RenoDX.DLSS5] NeuralUplift=1, NRPreset=2 (Performance)");
+    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"EnableHooks", L"2", iniPath);       // Direct NGX only (skip Streamline overhead)
+    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NRUICorrection", L"0", iniPath);    // Skip redundant 2D UI masking in VR
+    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NRPreset", L"2", iniPath);          // Preset 2: Performance
+    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NRStyle", L"0", iniPath);           // Neutral style
+    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NREnableUpscaling", L"1", iniPath); // Enable super-resolution upscaling
+    AppendLog(L"[CONFIG] Configured ReShade.ini: [RenoDX.DLSS5] EnableHooks=2, NRUICorrection=0, NRPreset=2, NREnableUpscaling=1");
 
     AppendLog(L"[SUCCESS] Installation finished successfully!");
     AppendLog(L"----------------------------------------------------------------------");

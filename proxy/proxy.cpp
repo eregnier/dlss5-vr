@@ -300,7 +300,11 @@ static void InitProxy()
     // 5. Lancer le thread d'écoute autonome pour F6 et Select+L3
     CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InputWatcherThread, NULL, 0, &g_inputWatcherThreadId);
 
-    LogMsg("[Proxy] Proxy ready (Autonomous Input Thread armed).");
+    // 6. Fixer la priorité haute pour garantir la stabilité de l'ordonnancement en VR
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
+    LogMsg("[Proxy] Proxy ready (Autonomous Input Thread armed, High Priority set).");
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
@@ -511,7 +515,8 @@ static void InitVariablesFromAddonOrIni()
 
         // Apply Performance preset to addon RAM immediately
         *(int32_t*)(g_renodxBase + 0x196B98) = g_nrPreset;
-        *(int32_t*)(g_renodxBase + 0x196C2C) = g_nrPreset;
+        // Keep NRStyle neutral (0) to prevent mixing filmic tone mapping with AI preset
+        *(int32_t*)(g_renodxBase + 0x196C2C) = 0;
 
         // Load scale & position from INI (default: 1.5x for Quest 3 comfort)
         g_hudScale = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDScale", 1, g_iniPath);
@@ -534,10 +539,12 @@ static void CommitSettingsToDisk()
     // High-performance single-pass section serialization (replaces 6 separate file opens/parses)
     char secBuf[512];
     int offset = 0;
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "EnableHooks=1") + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "EnableHooks=2") + 1; // NGX direct hooks only (skip Streamline interposer)
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRUICorrection=0") + 1; // Skip redundant UI mask pass in VR
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRIntensity=%.2f", g_masterEnable ? g_nrIntensity : 0.0f) + 1;
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRGlobalTone=%.2f", g_nrGlobalTone) + 1;
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRPreset=%d", g_nrPreset) + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRStyle=0") + 1;
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDScale=%d", g_hudScale) + 1;
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDPosition=%d", g_hudPosIndex) + 1;
     secBuf[offset] = '\0'; // Double null terminator for WritePrivateProfileSectionA
@@ -1462,7 +1469,6 @@ static void PollInput()
             *(float*)(g_renodxBase + 0x19364C) = g_masterEnable ? g_nrIntensity : 0.0f;
             *(float*)(g_renodxBase + 0x193650) = g_nrGlobalTone;
             *(int32_t*)(g_renodxBase + 0x196B98) = g_nrPreset;
-            *(int32_t*)(g_renodxBase + 0x196C2C) = g_nrPreset;
             *(uint8_t*)(g_renodxBase + 0x1935E8) = 1; // set dirty flag
         }
     }
