@@ -413,7 +413,7 @@ static void InitGDIRasterizer()
 }
 
 static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, float intensity, float tone, 
-                            int preset, int posIdx, int scaleMode, int activeRow, int liveHz, int pulsePhase)
+                            int preset, int posIdx, int scaleMode, int activeRow, int liveHz)
 {
     if (!hdc || !pGdiBits) return;
 
@@ -451,20 +451,19 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     SetTextColor(hdc, RGB(0, 220, 255));
     TextOutA(hdc, 16, 8, "DLSS 5 NEURAL RECON", 19);
 
-    // Heartbeat Pulse indicator + Live Hz Badge
-    int pulseColor = (pulsePhase % 2 == 0) ? RGB(0, 255, 140) : RGB(0, 180, 80);
-    HBRUSH hBrushDot = CreateSolidBrush(pulseColor);
-    HPEN hPenDot = CreatePen(PS_SOLID, 1, pulseColor);
+    // Solid Glowing Neon Green Dot (Rock-solid, no periodic blinking to prevent VR flicker)
+    HBRUSH hBrushDot = CreateSolidBrush(RGB(0, 255, 140));
+    HPEN hPenDot = CreatePen(PS_SOLID, 1, RGB(0, 255, 140));
     SelectObject(hdc, hBrushDot);
     SelectObject(hdc, hPenDot);
-    Ellipse(hdc, HUD_WIDTH - 138, 12, HUD_WIDTH - 128, 22);
+    Ellipse(hdc, HUD_WIDTH - 148, 12, HUD_WIDTH - 138, 22);
     DeleteObject(hBrushDot);
     DeleteObject(hPenDot);
 
-    // Hz & Status Pill Badge
+    // Hz & Status Pill Badge (Wider box: 122px wide to comfortably fit 144 Hz | ACTIVE)
     SelectObject(hdc, hFontBadge);
     char badgeBuf[32];
-    sprintf_s(badgeBuf, sizeof(badgeBuf), "%d Hz  |  %s", liveHz, masterEnable ? "ACTIF" : "BYPASS");
+    sprintf_s(badgeBuf, sizeof(badgeBuf), "%d Hz  |  %s", liveHz, masterEnable ? "ACTIVE" : "BYPASS");
     COLORREF badgeBg = masterEnable ? RGB(16, 75, 42) : RGB(100, 24, 24);
     COLORREF badgeBorder = masterEnable ? RGB(45, 200, 100) : RGB(220, 60, 60);
     COLORREF badgeText = masterEnable ? RGB(220, 255, 230) : RGB(255, 220, 220);
@@ -473,12 +472,12 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     HPEN hPenBadge = CreatePen(PS_SOLID, 1, badgeBorder);
     SelectObject(hdc, hBrushBadge);
     SelectObject(hdc, hPenBadge);
-    RoundRect(hdc, HUD_WIDTH - 120, 6, HUD_WIDTH - 14, 28, 8, 8);
+    RoundRect(hdc, HUD_WIDTH - 134, 6, HUD_WIDTH - 12, 28, 8, 8);
     DeleteObject(hBrushBadge);
     DeleteObject(hPenBadge);
 
     SetTextColor(hdc, badgeText);
-    RECT rcBadge = { HUD_WIDTH - 120, 6, HUD_WIDTH - 14, 28 };
+    RECT rcBadge = { HUD_WIDTH - 134, 6, HUD_WIDTH - 12, 28 };
     DrawTextA(hdc, badgeBuf, -1, &rcBadge, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     // Header Separator Line
@@ -515,9 +514,9 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
 
         // ROW 0: Neural Engine Toggle
         if (i == 0) {
-            TextOutA(hdc, 30, y + 2, "Moteur Neural", 13);
+            TextOutA(hdc, 30, y + 2, "Neural Engine", 13);
             SelectObject(hdc, hFontBadge);
-            const char* txt = masterEnable ? "[ ACTIF ]" : "[ BYPASS ]";
+            const char* txt = masterEnable ? "[ ACTIVE ]" : "[ BYPASS ]";
             COLORREF cBg = masterEnable ? RGB(15, 120, 55) : RGB(130, 28, 28);
             COLORREF cBd = masterEnable ? RGB(60, 240, 120) : RGB(250, 70, 70);
             HBRUSH hb = CreateSolidBrush(cBg);
@@ -532,9 +531,9 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             RECT rc = { 220, y + 2, 310, y + 21 };
             DrawTextA(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        // ROW 1: Intensity Slider (0.0 to 5.0)
+        // ROW 1: NR Intensity Slider (0.0 to 5.0)
         else if (i == 1) {
-            TextOutA(hdc, 30, y + 2, "Intensite NR", 12);
+            TextOutA(hdc, 30, y + 2, "NR Intensity", 12);
 
             char valBuf[16];
             sprintf_s(valBuf, sizeof(valBuf), "%.2f", intensity);
@@ -577,7 +576,7 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
         }
         // ROW 2: Sharpness / Tone Slider (0.0 to 2.0)
         else if (i == 2) {
-            TextOutA(hdc, 30, y + 2, "Nettete / Tone", 14);
+            TextOutA(hdc, 30, y + 2, "Sharpness / Tone", 16);
 
             char valBuf[16];
             sprintf_s(valBuf, sizeof(valBuf), "%.2f", tone);
@@ -620,7 +619,7 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
         }
         // ROW 3: AI Model Preset (0, 1, 2)
         else if (i == 3) {
-            TextOutA(hdc, 30, y + 2, "Preset Modele", 13);
+            TextOutA(hdc, 30, y + 2, "AI Model Preset", 15);
 
             const char* presetNames[3] = { 
                 "Preset 0  [DLSS-D Neural RR]", 
@@ -631,28 +630,28 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             SetTextColor(hdc, isActive ? RGB(255, 240, 120) : RGB(210, 200, 160));
             TextOutA(hdc, 170, y + 2, presetNames[preset % 3], (int)strlen(presetNames[preset % 3]));
         }
-        // ROW 4: HUD Position (Bas-Centre, Haut-Centre, Haut-Droite, Haut-Gauche)
+        // ROW 4: HUD Position (Bottom-Center, Top-Center, Top-Right, Top-Left)
         else if (i == 4) {
-            TextOutA(hdc, 30, y + 2, "Position HUD", 12);
+            TextOutA(hdc, 30, y + 2, "HUD Position", 12);
 
             const char* posNames[4] = { 
-                "Bas-Centre  (Standard VR)", 
-                "Haut-Centre (Bandeau)", 
-                "Haut-Droite (Discret)", 
-                "Haut-Gauche (Compteur)" 
+                "Bottom-Center  (Default VR)", 
+                "Top-Center     (Banner)", 
+                "Top-Right      (Discrete)", 
+                "Top-Left       (Gauge)" 
             };
             SelectObject(hdc, hFontValue);
             SetTextColor(hdc, isActive ? RGB(255, 220, 100) : RGB(210, 200, 150));
             TextOutA(hdc, 170, y + 2, posNames[posIdx % 4], (int)strlen(posNames[posIdx % 4]));
         }
-        // ROW 5: VR Scale (1.0x, 1.5x, 2.0x)
+        // ROW 5: VR UI Scale (1.0x, 1.5x, 2.0x)
         else if (i == 5) {
-            TextOutA(hdc, 30, y + 2, "Echelle VR", 10);
+            TextOutA(hdc, 30, y + 2, "VR UI Scale", 11);
 
             const char* scaleNames[3] = { 
-                "1.0x  [Compact / Pimax Fin]", 
-                "1.5x  [Equilibre]", 
-                "2.0x  [Confort]" 
+                "1.0x  [Compact / Pimax]", 
+                "1.5x  [Balanced]", 
+                "2.0x  [Comfort]" 
             };
             SelectObject(hdc, hFontValue);
             SetTextColor(hdc, isActive ? RGB(255, 220, 100) : RGB(210, 200, 150));
@@ -670,7 +669,7 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     SelectObject(hdc, hFontHelp);
     SetTextColor(hdc, RGB(120, 160, 200));
     RECT rcHelp = { 16, 198, HUD_WIDTH - 16, HUD_HEIGHT - 2 };
-    DrawTextA(hdc, "D-Pad: Naviguer / Ajuster  |  A: Valider  |  Select+L3 / F6: Fermer", -1, &rcHelp, DT_CENTER | DT_SINGLELINE);
+    DrawTextA(hdc, "D-Pad: Navigate / Adjust  |  A: Toggle  |  Select+L3 / F6: Close", -1, &rcHelp, DT_CENTER | DT_SINGLELINE);
 
     // Cleanup GDI objects
     SelectObject(hdc, hOldBrush);
@@ -898,9 +897,14 @@ static bool EnsureOpenVROverlay()
 
 static void UpdateOpenVROverlay(bool visible, bool isDirty)
 {
+    static bool s_lastVisible = false;
+
     if (!visible) {
-        if (g_pVROverlay && g_hVROverlay != vr::k_ulOverlayHandleInvalid) {
-            g_pVROverlay->HideOverlay(g_hVROverlay);
+        if (s_lastVisible) {
+            if (g_pVROverlay && g_hVROverlay != vr::k_ulOverlayHandleInvalid) {
+                g_pVROverlay->HideOverlay(g_hVROverlay);
+            }
+            s_lastVisible = false;
         }
         return;
     }
@@ -909,36 +913,40 @@ static void UpdateOpenVROverlay(bool visible, bool isDirty)
         return;
     }
 
-    g_pVROverlay->ShowOverlay(g_hVROverlay);
+    if (!s_lastVisible) {
+        g_pVROverlay->ShowOverlay(g_hVROverlay);
+        s_lastVisible = true;
+        isDirty = true; // Force fresh texture upload on reveal!
+    }
 
     static int s_lastScale = -1;
     static int s_lastPos = -1;
-    if (s_lastScale != g_hudScale || s_lastPos != g_hudPosIndex) {
+    if (s_lastScale != g_hudScale || s_lastPos != g_hudPosIndex || isDirty) {
         s_lastScale = g_hudScale;
         s_lastPos = g_hudPosIndex;
 
         // Finer, more compact physical size in VR for high-DPI Pimax / Quest 3
         float widthInMeters = 0.22f;
-        if (g_hudScale == 0) widthInMeters = 0.22f;      // 1.0x Compact / Pimax Fin
-        else if (g_hudScale == 1) widthInMeters = 0.28f; // 1.5x Equilibre
-        else if (g_hudScale == 2) widthInMeters = 0.36f; // 2.0x Confort
+        if (g_hudScale == 0) widthInMeters = 0.22f;      // 1.0x Compact / Pimax
+        else if (g_hudScale == 1) widthInMeters = 0.28f; // 1.5x Balanced
+        else if (g_hudScale == 2) widthInMeters = 0.36f; // 2.0x Comfort
         g_pVROverlay->SetOverlayWidthInMeters(g_hVROverlay, widthInMeters);
 
         float posX = 0.0f;
         float posY = -0.22f; // Sweet spot bas (fpsVR / dashboard)
-        float posZ = -0.75f; // 75 cm de distance
+        float posZ = -0.75f; // 75 cm distance
 
         switch (g_hudPosIndex % 4) {
-        case 0: // Bas-Centre
+        case 0: // Bottom-Center
             posX = 0.0f; posY = -0.22f; posZ = -0.75f;
             break;
-        case 1: // Haut-Centre
+        case 1: // Top-Center
             posX = 0.0f; posY = +0.20f; posZ = -0.75f;
             break;
-        case 2: // Haut-Droite
+        case 2: // Top-Right
             posX = +0.26f; posY = +0.16f; posZ = -0.75f;
             break;
-        case 3: // Haut-Gauche
+        case 3: // Top-Left
             posX = -0.26f; posY = +0.16f; posZ = -0.75f;
             break;
         }
@@ -955,7 +963,12 @@ static void UpdateOpenVROverlay(bool visible, bool isDirty)
     }
 
     if (isDirty) {
-        g_pVROverlay->SetOverlayRaw(g_hVROverlay, s_hudPixelsVR, HUD_WIDTH, HUD_HEIGHT, 4);
+        vr::EVROverlayError ovrErr = g_pVROverlay->SetOverlayRaw(g_hVROverlay, s_hudPixelsVR, HUD_WIDTH, HUD_HEIGHT, 4);
+        if (ovrErr != vr::VROverlayError_None) {
+            char buf[128];
+            sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] SetOverlayRaw error: %d", ovrErr);
+            LogMsg(buf);
+        }
     }
 }
 
@@ -1395,9 +1408,6 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
 
     LogMsg("[Proxy] Input Watcher Thread ready: polling F6 and Select+L3...");
 
-    static uint64_t s_lastPulseTick = 0;
-    static int s_pulsePhase = 0;
-
     while (true)
     {
         uint64_t now = GetTickCount64();
@@ -1411,20 +1421,11 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         // 3. Écouter les entrées clavier (F6) et manettes (Select+L3)
         PollInput();
 
-        // Animation du heartbeat dot toutes les 500 ms lorsque le HUD est affiché
-        if (g_hudVisible) {
-            if (now - s_lastPulseTick >= 500) {
-                s_lastPulseTick = now;
-                s_pulsePhase++;
-                g_hudDirty = true;
-            }
-        }
-
-        // 4. Mettre à jour les affichages Bureau et Casque VR
+        // 4. Mettre à jour les affichages Bureau et Casque VR uniquement lors d'un changement
         bool isDirty = g_hudDirty;
         if (g_hudVisible && isDirty) {
             RenderModernHUD(g_hGdiMemDC, g_pGdiBits, g_masterEnable, g_nrIntensity, g_nrGlobalTone, 
-                            g_nrPreset, g_hudPosIndex, g_hudScale, g_activeRow, g_liveHz, s_pulsePhase);
+                            g_nrPreset, g_hudPosIndex, g_hudScale, g_activeRow, g_liveHz);
         }
         UpdateOSDWindow(g_hudVisible, isDirty);
         UpdateOpenVROverlay(g_hudVisible, isDirty);
