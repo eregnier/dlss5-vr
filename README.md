@@ -1,4 +1,4 @@
-﻿# DLSS 5 <> VR : Intégration LukeRoss REAL VR & DLSS 5 Neural Reconstruction
+# DLSS 5 <> VR : Intégration LukeRoss REAL VR & DLSS 5 Neural Reconstruction
 
 Ce dépôt fournit l'architecture complète, le double proxy C++ haute performance, les outils d'automatisation et la documentation technique permettant de faire fonctionner simultanément le **mod REAL VR de LukeRoss** (OpenXR / SteamVR) et le moteur **DLSS 5 Neural Reconstruction** (ReShade 6.8+ Add-on + `renodx-dlss5` + `nvngx_dlssnr.dll`), avec un HUD de contrôle in-game natif (VR & Bureau) et le débridage de l'évaluation continue en temps réel.
 
@@ -37,6 +37,11 @@ Ce dépôt fournit l'architecture complète, le double proxy C++ haute performan
 
 ```
 vrdlss5/
+├── installer/                     # Installateur graphique universel C++ Win32 (~150 Ko)
+│   ├── installer.cpp              # Code source du GUI (Détection, Swap sécurisé, Rollback)
+│   ├── build.bat                  # Script de compilation en 1 clic (VR-DLSS5-Installer.exe)
+│   └── README.md                  # Guide d'utilisation du GUI
+│
 ├── proxy/                         # C++ Dual-Proxy (Composant cœur actif)
 │   ├── proxy.cpp                  # Code source C++ (Hooks DXGI, HUD Segoe UI, OpenVR, Patches RAM)
 │   ├── proxy.def                  # Définition des 23 exports DXGI
