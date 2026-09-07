@@ -226,3 +226,8 @@ The installer checks for updates against GitHub:
 ### License
 
 This project is licensed under the [MIT License](LICENSE).
+
+---
+
+*vibecoded with gemini 3.8 flash*
+
