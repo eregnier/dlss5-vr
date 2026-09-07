@@ -401,11 +401,7 @@ std::wstring FindOrDownloadComponent(const std::wstring& fileName)
         std::wstring(exePath) + L"\\..\\proxy",
         std::wstring(exePath) + L"\\deps",
         std::wstring(exePath) + L"\\..\\deps",
-        GetCacheDirectory(),
-        L"C:\\code\\dlss5-vr\\proxy",
-        L"C:\\code\\dlss5-vr\\deps",
-        L"C:\\code\\vrdlss5\\proxy",
-        L"C:\\code\\vrdlss5\\deps"
+        GetCacheDirectory()
     };
 
     for (const auto& base : searchBases) {
@@ -735,7 +731,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         DragAcceptFiles(hWnd, TRUE);
 
-        HWND hTitle = CreateWindowW(L"STATIC", L"DLSS 5 <> VR — Universal Installer",
+        HWND hTitle = CreateWindowW(L"STATIC", L"DLSS 5 <> VR - Universal Installer",
             WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 15, 420, 26, hWnd, NULL, NULL, NULL);
         SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hFontTitle, TRUE);
 
@@ -795,12 +791,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         AppendLog(std::wstring(L"DLSS 5 <> VR Universal Installer v") + CURRENT_VERSION_STR + L" ready.");
         AppendLog(L"Drag & drop a game executable here or click Browse.");
-
-        if (PathFileExistsW(L"D:\\Games\\AFOP\\afop.exe")) {
-            g_selectedExe = L"D:\\Games\\AFOP\\afop.exe";
-            SetWindowTextW(g_hEditPath, g_selectedExe.c_str());
-            InspectTarget();
-        }
         break;
     }
 
@@ -921,7 +911,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     g_hMainWnd = CreateWindowExW(
         0,
         L"VRDLSS5InstallerClass",
-        L"DLSS 5 <> VR — Universal Installer",
+        L"DLSS 5 <> VR - Universal Installer",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         x, y, w, h,
         NULL, NULL, hInstance, NULL
