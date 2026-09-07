@@ -30,6 +30,13 @@ tmp/
 # Dépôt externe amont cloné
 DLSS5oneclick/
 
+# Fichiers propriétaires tiers (LukeRoss Patreon)
+RealRepo/
+RealConfig.bat
+
+# Dumps bruts d'ingénierie inverse
+tools/audit/
+
 # Fichiers système & IDE
 Thumbs.db
 Desktop.ini

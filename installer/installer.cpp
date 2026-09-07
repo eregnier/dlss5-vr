@@ -1,13 +1,15 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <tlhelp32.h>
+#include <wininet.h>
 #include <stdio.h>
 #include <string>
 #include <vector>
+#include <functional>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -16,6 +18,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "wininet.lib")
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -59,6 +62,13 @@ void AppendLog(const std::wstring& text)
     SendMessageW(g_hEditLog, EM_REPLACESEL, 0, (LPARAM)text.c_str());
     SendMessageW(g_hEditLog, EM_REPLACESEL, 0, (LPARAM)L"\r\n");
     SendMessageW(g_hEditLog, EM_SCROLLCARET, 0, 0);
+
+    // Pump window messages so UI stays responsive during downloads
+    MSG msg;
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
 }
 
 bool FileContainsBytes(const std::wstring& path, const char* pattern, size_t patternLen)
@@ -137,7 +147,112 @@ bool KillRunningGame(const std::wstring& exeName)
     return killed;
 }
 
-std::wstring FindSourceFile(const std::wstring& fileName)
+bool DownloadHttpFile(const std::wstring& url, const std::wstring& destFile, const std::wstring& label)
+{
+    AppendLog(L"[DOWNLOAD] Initiating download: " + label);
+
+    HINTERNET hInternet = InternetOpenW(L"VR-DLSS5-Installer/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    if (!hInternet) {
+        AppendLog(L"[ERROR] Failed to open Internet handle.");
+        return false;
+    }
+
+    DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_SECURE;
+    HINTERNET hUrl = InternetOpenUrlW(hInternet, url.c_str(), NULL, 0, flags, 0);
+    if (!hUrl) {
+        InternetCloseHandle(hInternet);
+        AppendLog(L"[ERROR] Failed to connect to URL: " + url);
+        return false;
+    }
+
+    DWORD contentLength = 0;
+    DWORD bufferSize = sizeof(contentLength);
+    DWORD index = 0;
+    HttpQueryInfoW(hUrl, HTTP_QUERY_CONTENT_LENGTH | HTTP_QUERY_FLAG_NUMBER, &contentLength, &bufferSize, &index);
+
+    HANDLE hFile = CreateFileW(destFile.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        InternetCloseHandle(hUrl);
+        InternetCloseHandle(hInternet);
+        AppendLog(L"[ERROR] Failed to create destination file: " + destFile);
+        return false;
+    }
+
+    std::vector<char> buffer(64 * 1024);
+    DWORD bytesRead = 0;
+    DWORD totalDownloaded = 0;
+    DWORD lastReportPct = 0;
+    DWORD lastReportTick = GetTickCount();
+
+    while (InternetReadFile(hUrl, buffer.data(), (DWORD)buffer.size(), &bytesRead) && bytesRead > 0) {
+        DWORD written = 0;
+        WriteFile(hFile, buffer.data(), bytesRead, &written, NULL);
+        totalDownloaded += bytesRead;
+
+        DWORD now = GetTickCount();
+        if (contentLength > 0) {
+            DWORD pct = (DWORD)(((__int64)totalDownloaded * 100) / contentLength);
+            if (pct >= lastReportPct + 10 || (now - lastReportTick) > 1500) {
+                lastReportPct = pct;
+                lastReportTick = now;
+                wchar_t logBuf[256];
+                swprintf_s(logBuf, L"[DOWNLOAD] %s: %lu%% (%.1f MB / %.1f MB)",
+                    label.c_str(), pct, (float)totalDownloaded / (1024.0f * 1024.0f), (float)contentLength / (1024.0f * 1024.0f));
+                AppendLog(logBuf);
+            }
+        } else {
+            if ((now - lastReportTick) > 2000) {
+                lastReportTick = now;
+                wchar_t logBuf[256];
+                swprintf_s(logBuf, L"[DOWNLOAD] %s: %.1f MB downloaded...", label.c_str(), (float)totalDownloaded / (1024.0f * 1024.0f));
+                AppendLog(logBuf);
+            }
+        }
+    }
+
+    CloseHandle(hFile);
+    InternetCloseHandle(hUrl);
+    InternetCloseHandle(hInternet);
+
+    AppendLog(L"[DOWNLOAD] Completed: " + label);
+    return true;
+}
+
+bool ExtractZip(const std::wstring& zipPath, const std::wstring& outDir)
+{
+    AppendLog(std::wstring(L"[EXTRACT] Extracting ") + PathFindFileNameW(zipPath.c_str()) + L" via system tar...");
+    wchar_t cmd[1024];
+    swprintf_s(cmd, L"tar.exe -xf \"%s\" -C \"%s\"", zipPath.c_str(), outDir.c_str());
+
+    STARTUPINFOW si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = { 0 };
+
+    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 60000);
+        DWORD exitCode = 0;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return (exitCode == 0);
+    }
+    return false;
+}
+
+std::wstring GetCacheDirectory()
+{
+    wchar_t localApp[MAX_PATH];
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH)) {
+        wchar_t cachePath[MAX_PATH];
+        PathCombineW(cachePath, localApp, L"vr-dlss5-patch\\cache");
+        CreateDirectoryW(cachePath, NULL);
+        return std::wstring(cachePath);
+    }
+    return L".";
+}
+
+std::wstring FindOrDownloadComponent(const std::wstring& fileName)
 {
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -150,6 +265,7 @@ std::wstring FindSourceFile(const std::wstring& fileName)
         std::wstring(exePath) + L"\\..\\proxy",
         std::wstring(exePath) + L"\\deps",
         std::wstring(exePath) + L"\\..\\deps",
+        GetCacheDirectory(),
         L"C:\\code\\vrdlss5\\proxy",
         L"C:\\code\\vrdlss5\\deps"
     };
@@ -162,21 +278,39 @@ std::wstring FindSourceFile(const std::wstring& fileName)
         }
     }
 
+    std::wstring cacheDir = GetCacheDirectory();
+
+    // Auto-download nvngx_dlssnr.dll (~160 MB ShortFuse model) from RankFTW rhi-repo
     if (fileName == L"nvngx_dlssnr.dll") {
-        wchar_t localApp[MAX_PATH];
-        if (GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH)) {
-            wchar_t cachePath[MAX_PATH];
-            PathCombineW(cachePath, localApp, L"vr-dlss5-patch\\cache\\nvngx_dlssnr.dll");
-            if (PathFileExistsW(cachePath)) return std::wstring(cachePath);
+        wchar_t cachedModel[MAX_PATH];
+        PathCombineW(cachedModel, cacheDir.c_str(), L"nvngx_dlssnr.dll");
+        if (PathFileExistsW(cachedModel)) return std::wstring(cachedModel);
+
+        wchar_t zipDest[MAX_PATH];
+        PathCombineW(zipDest, cacheDir.c_str(), L"nvngx_dlssnr_310.8.SF-v2.zip");
+
+        std::wstring url = L"https://github.com/RankFTW/rhi-repo/releases/download/dlssnr-310.8.SF-v2/nvngx_dlssnr_310.8.SF-v2.zip";
+        if (DownloadHttpFile(url, zipDest, L"DLSS 5 Neural Model (nvngx_dlssnr.dll, ~160 MB)")) {
+            ExtractZip(zipDest, cacheDir);
+            DeleteFileW(zipDest);
+            if (PathFileExistsW(cachedModel)) return std::wstring(cachedModel);
         }
-        wchar_t userProf[MAX_PATH];
-        if (GetEnvironmentVariableW(L"USERPROFILE", userProf, MAX_PATH)) {
-            wchar_t dlPath[MAX_PATH];
-            PathCombineW(dlPath, userProf, L"Downloads\\nvngx_dlssnr.dll");
-            if (PathFileExistsW(dlPath)) return std::wstring(dlPath);
-        }
-        if (PathFileExistsW(L"D:\\Games\\AFOP\\nvngx_dlssnr.dll")) {
-            return L"D:\\Games\\AFOP\\nvngx_dlssnr.dll";
+    }
+
+    // Auto-download renodx-dlss5.addon64 if missing
+    if (fileName == L"renodx-dlss5.addon64") {
+        wchar_t cachedAddon[MAX_PATH];
+        PathCombineW(cachedAddon, cacheDir.c_str(), L"renodx-dlss5.addon64");
+        if (PathFileExistsW(cachedAddon)) return std::wstring(cachedAddon);
+
+        wchar_t zipDest[MAX_PATH];
+        PathCombineW(zipDest, cacheDir.c_str(), L"renodx-dlss5_4.70.zip");
+
+        std::wstring url = L"https://github.com/RankFTW/rhi-repo/releases/download/renodx-dlss5-4.70/renodx-dlss5_4.70.zip";
+        if (DownloadHttpFile(url, zipDest, L"RenoDX DLSS 5 Add-on")) {
+            ExtractZip(zipDest, cacheDir);
+            DeleteFileW(zipDest);
+            if (PathFileExistsW(cachedAddon)) return std::wstring(cachedAddon);
         }
     }
 
@@ -214,7 +348,6 @@ void InspectTarget()
     wchar_t ueCheck[MAX_PATH];
     PathCombineW(ueCheck, dir, L"Binaries\\Win64");
     if (PathFileExistsW(ueCheck)) {
-        // If the selected exe was in the root, but Binaries/Win64 has RealVR.ini or dxgi.dll
         wchar_t rvrCheck[MAX_PATH];
         PathCombineW(rvrCheck, ueCheck, L"RealVR.ini");
         if (PathFileExistsW(rvrCheck)) {
@@ -336,7 +469,6 @@ void DoInstall()
 
     if (!PathFileExistsW(realVR64Dst)) {
         if (PathFileExistsW(dxgiDst)) {
-            // Verify dxgi.dll is not already our proxy
             const char ourSig[] = "DLSS 5 <> VR";
             if (!FileContainsBytes(dxgiDst, ourSig, strlen(ourSig))) {
                 if (MoveFileW(dxgiDst, realVR64Dst)) {
@@ -352,7 +484,7 @@ void DoInstall()
         AppendLog(L"[INFO] RealVR64.dll already exists. Preserving LukeRoss core.");
     }
 
-    // Step 2: Copy Components
+    // Step 2: Copy / Download Components
     struct CopyPair {
         std::wstring srcName;
         std::wstring dstName;
@@ -369,14 +501,14 @@ void DoInstall()
     };
 
     for (const auto& item : files) {
-        std::wstring src = FindSourceFile(item.srcName);
+        std::wstring src = FindOrDownloadComponent(item.srcName);
         if (src.empty()) {
             if (item.required) {
                 AppendLog(L"[ERROR] Missing required component: " + item.srcName);
                 MessageBoxW(g_hMainWnd, (L"Missing required component: " + item.srcName).c_str(), L"Component Missing", MB_ICONERROR);
                 return;
             } else {
-                AppendLog(L"[WARN] Optional component not found: " + item.srcName);
+                AppendLog(L"[WARN] Optional component not found or download failed: " + item.srcName);
                 continue;
             }
         }
@@ -427,9 +559,7 @@ void DoRestore()
     PathCombineW(realVR64Dst, g_targetDir.c_str(), L"RealVR64.dll");
 
     if (PathFileExistsW(realVR64Dst)) {
-        // Delete our proxy dxgi.dll
         DeleteFileW(dxgiDst);
-        // Rename RealVR64.dll -> dxgi.dll
         if (MoveFileW(realVR64Dst, dxgiDst)) {
             AppendLog(L"[RESTORE] Restored RealVR64.dll -> dxgi.dll");
         } else {
@@ -437,7 +567,6 @@ void DoRestore()
         }
     }
 
-    // Clean up auxiliary files
     std::vector<std::wstring> toRemove = {
         L"ReShade64_dlss5.dll",
         L"renodx-dlss5.addon64",
@@ -468,7 +597,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         DragAcceptFiles(hWnd, TRUE);
 
-        // Header Title
         HWND hTitle = CreateWindowW(L"STATIC", L"DLSS 5 <> VR — Universal Installer",
             WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 15, 560, 26, hWnd, NULL, NULL, NULL);
         SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hFontTitle, TRUE);
@@ -477,7 +605,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 42, 560, 20, hWnd, NULL, NULL, NULL);
         SendMessageW(hSub, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-        // Game Exe Selection
         HWND hLblExe = CreateWindowW(L"STATIC", L"Target Game Executable (*.exe):",
             WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 75, 400, 18, hWnd, NULL, NULL, NULL);
         SendMessageW(hLblExe, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
@@ -490,7 +617,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 490, 94, 90, 27, hWnd, (HMENU)IDC_BTN_BROWSE, NULL, NULL);
         SendMessageW(g_hBtnBrowse, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-        // Diagnostics Group
         HWND hGrp = CreateWindowW(L"BUTTON", L"Diagnostics & Detection",
             WS_VISIBLE | WS_CHILD | BS_GROUPBOX, 20, 130, 560, 140, hWnd, NULL, NULL, NULL);
         SendMessageW(hGrp, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
@@ -499,7 +625,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WS_VISIBLE | WS_CHILD | SS_LEFT, 35, 152, 530, 110, hWnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
         SendMessageW(g_hStaticStatus, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-        // Buttons
         g_hBtnInstall = CreateWindowW(L"BUTTON", L"Install / Update DLSS 5",
             WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | WS_DISABLED, 20, 280, 200, 36, hWnd, (HMENU)IDC_BTN_INSTALL, NULL, NULL);
         SendMessageW(g_hBtnInstall, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
@@ -512,7 +637,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 480, 280, 100, 36, hWnd, (HMENU)IDC_BTN_REFRESH, NULL, NULL);
         SendMessageW(g_hBtnRefresh, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-        // Log Output
         HWND hLblLog = CreateWindowW(L"STATIC", L"Activity Log:",
             WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 325, 200, 18, hWnd, NULL, NULL, NULL);
         SendMessageW(hLblLog, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
@@ -525,7 +649,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         AppendLog(L"DLSS 5 <> VR Universal Installer ready.");
         AppendLog(L"Drag & drop a game executable here or click Browse.");
 
-        // Default to AFOP if present
         if (PathFileExistsW(L"D:\\Games\\AFOP\\afop.exe")) {
             g_selectedExe = L"D:\\Games\\AFOP\\afop.exe";
             SetWindowTextW(g_hEditPath, g_selectedExe.c_str());
@@ -540,7 +663,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         wchar_t dropped[MAX_PATH];
         if (DragQueryFileW(hDrop, 0, dropped, MAX_PATH)) {
             if (PathIsDirectoryW(dropped)) {
-                // If a directory was dropped, search for first .exe
                 wchar_t searchPattern[MAX_PATH];
                 PathCombineW(searchPattern, dropped, L"*.exe");
                 WIN32_FIND_DATAW ffd;

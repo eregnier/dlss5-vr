@@ -1,1 +1,0 @@
--s#(AimAssist) = "\w*"# -r#\1 = "false"#
