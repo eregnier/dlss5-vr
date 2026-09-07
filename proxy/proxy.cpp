@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
-#include "font8x14.h"
 #define OPENVR_BUILD_STATIC
 #include "openvr.h"
 
@@ -254,8 +253,8 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, vo
 // VR-DLSS 5 HUD & REAL-TIME CONTROLLER (Quest 3 & Pimax Multi-Res)
 // ============================================================================
 
-#define HUD_WIDTH 384
-#define HUD_HEIGHT 144
+#define HUD_WIDTH  480
+#define HUD_HEIGHT 220
 
 struct HUDColor {
     uint8_t r, g, b, a;
@@ -276,9 +275,9 @@ static bool g_masterEnable = true;
 static float g_nrIntensity = 2.50f;
 static float g_nrGlobalTone = 1.00f;
 static int g_nrPreset = 0;
-static int g_hudScale = 1; // 0: 1.0x (Compact / Pimax), 1: 1.5x (Balanced / Quest 3 Default), 2: 2.0x (Comfort / Quest 3)
-static int g_activeRow = 0; // 0 to 4
-static int g_hudPosIndex = 0; // 0: Bottom-Center (Default), 1: Top-Center, 2: Top-Right, 3: Top-Left
+static int g_hudScale = 0; // 0: 1.0x (Compact / Pimax Fin), 1: 1.5x (Equilibre), 2: 2.0x (Confort)
+static int g_activeRow = 0; // 0 to 5
+static int g_hudPosIndex = 0; // 0: Bas-Centre, 1: Haut-Centre, 2: Haut-Droite, 3: Haut-Gauche
 static int g_liveHz = 72;
 
 // 500 ms Debounce State
@@ -386,167 +385,336 @@ static void CommitSettingsToDisk()
 }
 
 // ----------------------------------------------------------------------------
-// Compact Software Rasterizer
+// Modern High-DPI GDI Vector Rasterizer (Anti-Aliased Segoe UI, Zero-Crash)
 // ----------------------------------------------------------------------------
-static HUDColor s_hudPixels[HUD_HEIGHT][HUD_WIDTH];
+static uint32_t s_hudPixelsOSD[HUD_HEIGHT * HUD_WIDTH];   // Premultiplied BGRA for Desktop Layered Window
+static uint8_t  s_hudPixelsVR[HUD_HEIGHT * HUD_WIDTH * 4]; // RGBA for OpenVR SetOverlayRaw
+static HDC      g_hGdiMemDC = NULL;
+static HBITMAP  g_hGdiBmp = NULL;
+static uint32_t* g_pGdiBits = NULL;
 
-static void HUD_Clear(HUDColor color)
+static void InitGDIRasterizer()
 {
+    if (g_hGdiMemDC) return;
+    HDC hdcScreen = GetDC(NULL);
+    g_hGdiMemDC = CreateCompatibleDC(hdcScreen);
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = HUD_WIDTH;
+    bmi.bmiHeader.biHeight = -HUD_HEIGHT; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    g_hGdiBmp = CreateDIBSection(g_hGdiMemDC, &bmi, DIB_RGB_COLORS, (void**)&g_pGdiBits, NULL, 0);
+    SelectObject(g_hGdiMemDC, g_hGdiBmp);
+    ReleaseDC(NULL, hdcScreen);
+}
+
+static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, float intensity, float tone, 
+                            int preset, int posIdx, int scaleMode, int activeRow, int liveHz, int pulsePhase)
+{
+    if (!hdc || !pGdiBits) return;
+
+    // 1. Clear GDI buffer to 0
+    memset(pGdiBits, 0, HUD_WIDTH * HUD_HEIGHT * 4);
+
+    // 2. Setup GDI state
+    SetBkMode(hdc, TRANSPARENT);
+
+    HFONT hFontTitle = CreateFontA(17, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 
+                                  DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    HFONT hFontMain  = CreateFontA(15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 
+                                  DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    HFONT hFontValue = CreateFontA(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 
+                                  DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    HFONT hFontBadge = CreateFontA(12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 
+                                  DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    HFONT hFontHelp  = CreateFontA(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 
+                                  DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+
+    // 3. Draw Background Card (Translucent slate with rounded corners)
+    HBRUSH hBrushCard = CreateSolidBrush(RGB(14, 18, 26));
+    HPEN hPenBorder = CreatePen(PS_SOLID, 1, RGB(0, 180, 235)); // Cyan neon outline
+    HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrushCard);
+    HPEN hOldPen = (HPEN)SelectObject(hdc, hPenBorder);
+    RoundRect(hdc, 1, 1, HUD_WIDTH - 1, HUD_HEIGHT - 1, 14, 14);
+
+    // 4. Header Bar: Title
+    SelectObject(hdc, hFontTitle);
+    SetTextColor(hdc, RGB(0, 220, 255));
+    TextOutA(hdc, 16, 8, "DLSS 5 NEURAL RECON", 19);
+
+    // Heartbeat Pulse indicator + Live Hz Badge
+    int pulseColor = (pulsePhase % 2 == 0) ? RGB(0, 255, 140) : RGB(0, 180, 80);
+    HBRUSH hBrushDot = CreateSolidBrush(pulseColor);
+    HPEN hPenDot = CreatePen(PS_SOLID, 1, pulseColor);
+    SelectObject(hdc, hBrushDot);
+    SelectObject(hdc, hPenDot);
+    Ellipse(hdc, HUD_WIDTH - 138, 12, HUD_WIDTH - 128, 22);
+    DeleteObject(hBrushDot);
+    DeleteObject(hPenDot);
+
+    // Hz & Status Pill Badge
+    SelectObject(hdc, hFontBadge);
+    char badgeBuf[32];
+    sprintf_s(badgeBuf, sizeof(badgeBuf), "%d Hz  |  %s", liveHz, masterEnable ? "ACTIF" : "BYPASS");
+    COLORREF badgeBg = masterEnable ? RGB(16, 75, 42) : RGB(100, 24, 24);
+    COLORREF badgeBorder = masterEnable ? RGB(45, 200, 100) : RGB(220, 60, 60);
+    COLORREF badgeText = masterEnable ? RGB(220, 255, 230) : RGB(255, 220, 220);
+
+    HBRUSH hBrushBadge = CreateSolidBrush(badgeBg);
+    HPEN hPenBadge = CreatePen(PS_SOLID, 1, badgeBorder);
+    SelectObject(hdc, hBrushBadge);
+    SelectObject(hdc, hPenBadge);
+    RoundRect(hdc, HUD_WIDTH - 120, 6, HUD_WIDTH - 14, 28, 8, 8);
+    DeleteObject(hBrushBadge);
+    DeleteObject(hPenBadge);
+
+    SetTextColor(hdc, badgeText);
+    RECT rcBadge = { HUD_WIDTH - 120, 6, HUD_WIDTH - 14, 28 };
+    DrawTextA(hdc, badgeBuf, -1, &rcBadge, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    // Header Separator Line
+    HPEN hPenSep = CreatePen(PS_SOLID, 1, RGB(32, 54, 82));
+    SelectObject(hdc, hPenSep);
+    MoveToEx(hdc, 14, 34, NULL);
+    LineTo(hdc, HUD_WIDTH - 14, 34);
+    DeleteObject(hPenSep);
+
+    // 5. Six Menu Rows: Y positions
+    int rowY[6] = { 38, 64, 90, 116, 142, 168 };
+
+    for (int i = 0; i < 6; i++) {
+        int y = rowY[i];
+        bool isActive = (i == activeRow);
+
+        if (isActive) {
+            HBRUSH hBrushRow = CreateSolidBrush(RGB(24, 46, 76));
+            HPEN hPenRow = CreatePen(PS_SOLID, 1, RGB(0, 170, 255));
+            SelectObject(hdc, hBrushRow);
+            SelectObject(hdc, hPenRow);
+            RoundRect(hdc, 10, y, HUD_WIDTH - 10, y + 23, 8, 8);
+            DeleteObject(hBrushRow);
+            DeleteObject(hPenRow);
+
+            SelectObject(hdc, hFontMain);
+            SetTextColor(hdc, RGB(255, 230, 0));
+            TextOutA(hdc, 16, y + 2, ">", 1);
+        }
+
+        SelectObject(hdc, hFontMain);
+        COLORREF labelColor = isActive ? RGB(255, 255, 255) : RGB(170, 185, 205);
+        SetTextColor(hdc, labelColor);
+
+        // ROW 0: Neural Engine Toggle
+        if (i == 0) {
+            TextOutA(hdc, 30, y + 2, "Moteur Neural", 13);
+            SelectObject(hdc, hFontBadge);
+            const char* txt = masterEnable ? "[ ACTIF ]" : "[ BYPASS ]";
+            COLORREF cBg = masterEnable ? RGB(15, 120, 55) : RGB(130, 28, 28);
+            COLORREF cBd = masterEnable ? RGB(60, 240, 120) : RGB(250, 70, 70);
+            HBRUSH hb = CreateSolidBrush(cBg);
+            HPEN hp = CreatePen(PS_SOLID, 1, cBd);
+            SelectObject(hdc, hb);
+            SelectObject(hdc, hp);
+            RoundRect(hdc, 220, y + 2, 310, y + 21, 6, 6);
+            DeleteObject(hb);
+            DeleteObject(hp);
+
+            SetTextColor(hdc, RGB(255, 255, 255));
+            RECT rc = { 220, y + 2, 310, y + 21 };
+            DrawTextA(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        // ROW 1: Intensity Slider (0.0 to 5.0)
+        else if (i == 1) {
+            TextOutA(hdc, 30, y + 2, "Intensite NR", 12);
+
+            char valBuf[16];
+            sprintf_s(valBuf, sizeof(valBuf), "%.2f", intensity);
+            SelectObject(hdc, hFontValue);
+            SetTextColor(hdc, isActive ? RGB(0, 240, 255) : RGB(140, 200, 230));
+            TextOutA(hdc, 170, y + 2, valBuf, (int)strlen(valBuf));
+
+            int sx = 220, sy = y + 7, sw = 230, sh = 8;
+            HBRUSH hTrackBg = CreateSolidBrush(RGB(22, 32, 48));
+            HPEN hTrackPen = CreatePen(PS_SOLID, 1, RGB(45, 68, 98));
+            SelectObject(hdc, hTrackBg);
+            SelectObject(hdc, hTrackPen);
+            RoundRect(hdc, sx, sy, sx + sw, sy + sh, 4, 4);
+            DeleteObject(hTrackBg);
+            DeleteObject(hTrackPen);
+
+            float norm = intensity / 5.0f;
+            if (norm < 0.0f) norm = 0.0f;
+            if (norm > 1.0f) norm = 1.0f;
+            int fillW = (int)(sw * norm);
+            if (fillW > 0) {
+                HBRUSH hFill = CreateSolidBrush(RGB(0, 160, 225));
+                HPEN hFillPen = CreatePen(PS_NULL, 0, 0);
+                SelectObject(hdc, hFill);
+                SelectObject(hdc, hFillPen);
+                RoundRect(hdc, sx, sy, sx + fillW, sy + sh, 4, 4);
+                DeleteObject(hFill);
+                DeleteObject(hFillPen);
+            }
+
+            int thumbX = sx + fillW;
+            if (thumbX > sx + sw) thumbX = sx + sw;
+            HBRUSH hThumb = CreateSolidBrush(RGB(0, 255, 255));
+            HPEN hThumbPen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+            SelectObject(hdc, hThumb);
+            SelectObject(hdc, hThumbPen);
+            RoundRect(hdc, thumbX - 3, sy - 3, thumbX + 3, sy + sh + 3, 4, 4);
+            DeleteObject(hThumb);
+            DeleteObject(hThumbPen);
+        }
+        // ROW 2: Sharpness / Tone Slider (0.0 to 2.0)
+        else if (i == 2) {
+            TextOutA(hdc, 30, y + 2, "Nettete / Tone", 14);
+
+            char valBuf[16];
+            sprintf_s(valBuf, sizeof(valBuf), "%.2f", tone);
+            SelectObject(hdc, hFontValue);
+            SetTextColor(hdc, isActive ? RGB(0, 255, 200) : RGB(130, 220, 190));
+            TextOutA(hdc, 170, y + 2, valBuf, (int)strlen(valBuf));
+
+            int sx = 220, sy = y + 7, sw = 230, sh = 8;
+            HBRUSH hTrackBg = CreateSolidBrush(RGB(22, 32, 48));
+            HPEN hTrackPen = CreatePen(PS_SOLID, 1, RGB(45, 68, 98));
+            SelectObject(hdc, hTrackBg);
+            SelectObject(hdc, hTrackPen);
+            RoundRect(hdc, sx, sy, sx + sw, sy + sh, 4, 4);
+            DeleteObject(hTrackBg);
+            DeleteObject(hTrackPen);
+
+            float norm = tone / 2.0f;
+            if (norm < 0.0f) norm = 0.0f;
+            if (norm > 1.0f) norm = 1.0f;
+            int fillW = (int)(sw * norm);
+            if (fillW > 0) {
+                HBRUSH hFill = CreateSolidBrush(RGB(0, 180, 150));
+                HPEN hFillPen = CreatePen(PS_NULL, 0, 0);
+                SelectObject(hdc, hFill);
+                SelectObject(hdc, hFillPen);
+                RoundRect(hdc, sx, sy, sx + fillW, sy + sh, 4, 4);
+                DeleteObject(hFill);
+                DeleteObject(hFillPen);
+            }
+
+            int thumbX = sx + fillW;
+            if (thumbX > sx + sw) thumbX = sx + sw;
+            HBRUSH hThumb = CreateSolidBrush(RGB(50, 255, 200));
+            HPEN hThumbPen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+            SelectObject(hdc, hThumb);
+            SelectObject(hdc, hThumbPen);
+            RoundRect(hdc, thumbX - 3, sy - 3, thumbX + 3, sy + sh + 3, 4, 4);
+            DeleteObject(hThumb);
+            DeleteObject(hThumbPen);
+        }
+        // ROW 3: AI Model Preset (0, 1, 2)
+        else if (i == 3) {
+            TextOutA(hdc, 30, y + 2, "Preset Modele", 13);
+
+            const char* presetNames[3] = { 
+                "Preset 0  [DLSS-D Neural RR]", 
+                "Preset 1  [Ultra Quality]", 
+                "Preset 2  [Performance]" 
+            };
+            SelectObject(hdc, hFontValue);
+            SetTextColor(hdc, isActive ? RGB(255, 240, 120) : RGB(210, 200, 160));
+            TextOutA(hdc, 170, y + 2, presetNames[preset % 3], (int)strlen(presetNames[preset % 3]));
+        }
+        // ROW 4: HUD Position (Bas-Centre, Haut-Centre, Haut-Droite, Haut-Gauche)
+        else if (i == 4) {
+            TextOutA(hdc, 30, y + 2, "Position HUD", 12);
+
+            const char* posNames[4] = { 
+                "Bas-Centre  (Standard VR)", 
+                "Haut-Centre (Bandeau)", 
+                "Haut-Droite (Discret)", 
+                "Haut-Gauche (Compteur)" 
+            };
+            SelectObject(hdc, hFontValue);
+            SetTextColor(hdc, isActive ? RGB(255, 220, 100) : RGB(210, 200, 150));
+            TextOutA(hdc, 170, y + 2, posNames[posIdx % 4], (int)strlen(posNames[posIdx % 4]));
+        }
+        // ROW 5: VR Scale (1.0x, 1.5x, 2.0x)
+        else if (i == 5) {
+            TextOutA(hdc, 30, y + 2, "Echelle VR", 10);
+
+            const char* scaleNames[3] = { 
+                "1.0x  [Compact / Pimax Fin]", 
+                "1.5x  [Equilibre]", 
+                "2.0x  [Confort]" 
+            };
+            SelectObject(hdc, hFontValue);
+            SetTextColor(hdc, isActive ? RGB(255, 220, 100) : RGB(210, 200, 150));
+            TextOutA(hdc, 170, y + 2, scaleNames[scaleMode % 3], (int)strlen(scaleNames[scaleMode % 3]));
+        }
+    }
+
+    // 6. Footer Help Bar
+    HPEN hPenFoot = CreatePen(PS_SOLID, 1, RGB(30, 50, 75));
+    SelectObject(hdc, hPenFoot);
+    MoveToEx(hdc, 14, 196, NULL);
+    LineTo(hdc, HUD_WIDTH - 14, 196);
+    DeleteObject(hPenFoot);
+
+    SelectObject(hdc, hFontHelp);
+    SetTextColor(hdc, RGB(120, 160, 200));
+    RECT rcHelp = { 16, 198, HUD_WIDTH - 16, HUD_HEIGHT - 2 };
+    DrawTextA(hdc, "D-Pad: Naviguer / Ajuster  |  A: Valider  |  Select+L3 / F6: Fermer", -1, &rcHelp, DT_CENTER | DT_SINGLELINE);
+
+    // Cleanup GDI objects
+    SelectObject(hdc, hOldBrush);
+    SelectObject(hdc, hOldPen);
+    DeleteObject(hBrushCard);
+    DeleteObject(hPenBorder);
+    DeleteObject(hFontTitle);
+    DeleteObject(hFontMain);
+    DeleteObject(hFontValue);
+    DeleteObject(hFontBadge);
+    DeleteObject(hFontHelp);
+
+    // 7. Alpha channel post-processing for both Desktop (OSD) and VR (OpenVR)
     for (int y = 0; y < HUD_HEIGHT; y++) {
         for (int x = 0; x < HUD_WIDTH; x++) {
-            s_hudPixels[y][x] = color;
-        }
-    }
-}
+            int idx = y * HUD_WIDTH + x;
+            uint32_t px = pGdiBits[idx];
+            uint8_t b = (uint8_t)(px & 0xFF);
+            uint8_t g = (uint8_t)((px >> 8) & 0xFF);
+            uint8_t r = (uint8_t)((px >> 16) & 0xFF);
 
-static void HUD_FillRect(int x0, int y0, int w, int h, HUDColor color)
-{
-    if (x0 < 0) { w += x0; x0 = 0; }
-    if (y0 < 0) { h += y0; y0 = 0; }
-    if (x0 + w > HUD_WIDTH) w = HUD_WIDTH - x0;
-    if (y0 + h > HUD_HEIGHT) h = HUD_HEIGHT - y0;
-    if (w <= 0 || h <= 0) return;
-
-    for (int y = y0; y < y0 + h; y++) {
-        for (int x = x0; x < x0 + w; x++) {
-            s_hudPixels[y][x] = color;
-        }
-    }
-}
-
-static void HUD_DrawRect(int x0, int y0, int w, int h, HUDColor color)
-{
-    HUD_FillRect(x0, y0, w, 1, color);
-    HUD_FillRect(x0, y0 + h - 1, w, 1, color);
-    HUD_FillRect(x0, y0, 1, h, color);
-    HUD_FillRect(x0 + w - 1, y0, 1, h, color);
-}
-
-static void HUD_DrawChar(int x, int y, char c, HUDColor color)
-{
-    if (c < 32 || c > 126) c = '?';
-    int idx = c - 32;
-    for (int r = 0; r < 14; r++) {
-        int py = y + r;
-        if (py < 0 || py >= HUD_HEIGHT) continue;
-        uint8_t rowBits = g_font8x14[idx][r];
-        for (int b = 0; b < 8; b++) {
-            int px = x + b;
-            if (px < 0 || px >= HUD_WIDTH) continue;
-            if (rowBits & (0x80 >> b)) {
-                s_hudPixels[py][px] = color;
+            uint8_t a = 0;
+            if (r > 0 || g > 0 || b > 0) {
+                if (r <= 20 && g <= 24 && b <= 32) {
+                    a = 230; // 90% translucent dark background
+                } else {
+                    a = 255; // 100% solid for text, neon borders, sliders, badges
+                }
             }
+
+            // Premultiplied BGRA for Windows UpdateLayeredWindow
+            uint32_t pr = (r * a) / 255;
+            uint32_t pg = (g * a) / 255;
+            uint32_t pb = (b * a) / 255;
+            s_hudPixelsOSD[idx] = ((uint32_t)a << 24) | (pr << 16) | (pg << 8) | pb;
+
+            // Straight RGBA for OpenVR SetOverlayRaw
+            int vrIdx = idx * 4;
+            s_hudPixelsVR[vrIdx + 0] = r;
+            s_hudPixelsVR[vrIdx + 1] = g;
+            s_hudPixelsVR[vrIdx + 2] = b;
+            s_hudPixelsVR[vrIdx + 3] = a;
         }
     }
-}
-
-static void HUD_DrawText(int x, int y, const char* str, HUDColor color)
-{
-    while (*str) {
-        HUD_DrawChar(x, y, *str, color);
-        x += 8;
-        str++;
-    }
-}
-
-static void HUD_DrawSlider(int x, int y, int w, int h, float valNorm, HUDColor fillColor, HUDColor bgColor, HUDColor borderColor, HUDColor thumbColor)
-{
-    HUD_FillRect(x, y, w, h, bgColor);
-    int fillW = (int)(w * valNorm);
-    if (fillW > w) fillW = w;
-    if (fillW < 0) fillW = 0;
-    if (fillW > 0) {
-        HUD_FillRect(x, y, fillW, h, fillColor);
-    }
-    HUD_DrawRect(x, y, w, h, borderColor);
-    int thumbX = x + fillW;
-    if (thumbX >= x + w) thumbX = x + w - 1;
-    HUD_FillRect(thumbX - 1, y - 1, 3, h + 2, thumbColor);
-}
-
-static void RenderHUD(bool masterEnable, float intensity, float tone, int preset, int scaleMode, int activeRow, int posIdx, int liveHz)
-{
-    // Dark slate background
-    HUD_Clear(MakeHUDColor(14, 18, 26, 245));
-    // Cyan neon border
-    HUD_DrawRect(0, 0, HUD_WIDTH, HUD_HEIGHT, MakeHUDColor(0, 180, 230, 255));
-    HUD_DrawRect(1, 1, HUD_WIDTH - 2, HUD_HEIGHT - 2, MakeHUDColor(20, 40, 60, 200));
-
-    // Title Header
-    const char* posNames[] = { "BOT-C", "TOP-C", "TOP-R", "TOP-L" };
-    char titleBuf[64];
-    sprintf_s(titleBuf, sizeof(titleBuf), "DLSS 5 NEURAL RECON [%s]", posNames[posIdx & 3]);
-    HUD_DrawText(10, 5, titleBuf, MakeHUDColor(0, 220, 255, 255));
-
-    // Dynamic Live Hz status badge (72Hz, 80Hz, 90Hz, 120Hz)
-    char badgeBuf[32];
-    if (masterEnable) {
-        sprintf_s(badgeBuf, sizeof(badgeBuf), "%dHz ON", liveHz);
-        HUD_FillRect(HUD_WIDTH - 65, 4, 55, 14, MakeHUDColor(20, 120, 50, 255));
-        HUD_DrawRect(HUD_WIDTH - 65, 4, 55, 14, MakeHUDColor(80, 255, 120, 255));
-        HUD_DrawText(HUD_WIDTH - 57, 5, badgeBuf, MakeHUDColor(255, 255, 255, 255));
-    } else {
-        HUD_FillRect(HUD_WIDTH - 65, 4, 55, 14, MakeHUDColor(120, 30, 30, 255));
-        HUD_DrawRect(HUD_WIDTH - 65, 4, 55, 14, MakeHUDColor(255, 80, 80, 255));
-        HUD_DrawText(HUD_WIDTH - 57, 5, "BYPASS", MakeHUDColor(255, 255, 255, 255));
-    }
-
-    // Separator line
-    HUD_FillRect(8, 19, HUD_WIDTH - 16, 1, MakeHUDColor(40, 70, 100, 255));
-
-    // 5 Rows
-    int rowY[5] = { 22, 42, 62, 82, 102 };
-    for (int i = 0; i < 5; i++) {
-        if (i == activeRow) {
-            HUD_FillRect(6, rowY[i] - 1, HUD_WIDTH - 12, 17, MakeHUDColor(25, 45, 75, 255));
-            HUD_DrawRect(6, rowY[i] - 1, HUD_WIDTH - 12, 17, MakeHUDColor(0, 180, 255, 200));
-            HUD_DrawText(10, rowY[i] + 1, ">", MakeHUDColor(255, 255, 0, 255));
-        } else {
-            HUD_DrawText(10, rowY[i] + 1, " ", MakeHUDColor(100, 120, 140, 255));
-        }
-    }
-
-    // ROW 0: Master Enable / Bypass
-    HUD_DrawText(22, rowY[0] + 1, "Neural Engine :", activeRow == 0 ? MakeHUDColor(255, 255, 255) : MakeHUDColor(190, 200, 210));
-    if (masterEnable) {
-        HUD_FillRect(155, rowY[0] + 1, 62, 13, MakeHUDColor(15, 140, 60, 255));
-        HUD_DrawRect(155, rowY[0] + 1, 62, 13, MakeHUDColor(60, 255, 120, 255));
-        HUD_DrawText(160, rowY[0] + 1, "[ ACTIVE ]", MakeHUDColor(255, 255, 255));
-    } else {
-        HUD_FillRect(155, rowY[0] + 1, 62, 13, MakeHUDColor(140, 30, 30, 255));
-        HUD_DrawRect(155, rowY[0] + 1, 62, 13, MakeHUDColor(255, 80, 80, 255));
-        HUD_DrawText(160, rowY[0] + 1, "[ BYPASS ]", MakeHUDColor(255, 200, 200));
-    }
-
-    // ROW 1: Intensity Slider (0.0 to 5.0)
-    char intBuf[32];
-    sprintf_s(intBuf, sizeof(intBuf), "Intensity   : %4.2f", intensity);
-    HUD_DrawText(22, rowY[1] + 1, intBuf, activeRow == 1 ? MakeHUDColor(255, 255, 255) : MakeHUDColor(190, 200, 210));
-    float normInt = intensity / 5.0f;
-    HUD_DrawSlider(175, rowY[1] + 3, 195, 9, normInt, MakeHUDColor(0, 160, 220), MakeHUDColor(20, 30, 45), MakeHUDColor(60, 90, 130), MakeHUDColor(0, 255, 255));
-
-    // ROW 2: Sharpness / Tone Slider (0.0 to 2.0)
-    char toneBuf[32];
-    sprintf_s(toneBuf, sizeof(toneBuf), "Sharp / Tone: %4.2f", tone);
-    HUD_DrawText(22, rowY[2] + 1, toneBuf, activeRow == 2 ? MakeHUDColor(255, 255, 255) : MakeHUDColor(190, 200, 210));
-    float normTone = tone / 2.0f;
-    HUD_DrawSlider(175, rowY[2] + 3, 195, 9, normTone, MakeHUDColor(0, 180, 160), MakeHUDColor(20, 30, 45), MakeHUDColor(60, 90, 130), MakeHUDColor(0, 255, 200));
-
-    // ROW 3: AI Model Preset (0, 1, 2)
-    const char* presetNames[3] = { "Preset 0 (DLSS-D RR)", "Preset 1 (Ultra Quality)", "Preset 2 (Performance)" };
-    char preBuf[64];
-    sprintf_s(preBuf, sizeof(preBuf), "AI Preset   : %s", presetNames[preset % 3]);
-    HUD_DrawText(22, rowY[3] + 1, preBuf, activeRow == 3 ? MakeHUDColor(255, 255, 100) : MakeHUDColor(190, 200, 210));
-
-    // ROW 4: UI Scale Mode (Quest 3 & Pimax)
-    const char* scaleNames[3] = { "1.0x [Compact/Pimax]", "1.5x [Balanced/Quest3]", "2.0x [Comfort/Quest3]" };
-    char scaleBuf[64];
-    sprintf_s(scaleBuf, sizeof(scaleBuf), "UI Scale    : %s", scaleNames[scaleMode % 3]);
-    HUD_DrawText(22, rowY[4] + 1, scaleBuf, activeRow == 4 ? MakeHUDColor(255, 255, 100) : MakeHUDColor(190, 200, 210));
-
-    // Footer Help Bar
-    HUD_FillRect(6, 122, HUD_WIDTH - 12, 1, MakeHUDColor(35, 60, 90, 255));
-    HUD_DrawText(10, 126, "^v:Row <>:Adj A:Tgl Y:Pos R3/F7:Scale F6:Off", MakeHUDColor(120, 160, 190, 255));
 }
 
 
@@ -661,14 +829,18 @@ static uint64_t g_lastOpenVRInitAttempt = 0;
 
 static bool EnsureOpenVROverlay()
 {
-    // 0. Protection absolue anti-blocage au splashscreen / Ubisoft Connect :
-    // Ne jamais tenter d'initialiser OpenVR tant que le moteur 3D n'évalue pas de frames
-    if (g_evalFrameCounter < 5 && !g_hudVisible) {
-        return false;
-    }
-
+    // If already connected and overlay handle is valid, we are ready!
     if (g_openvrInitialized && g_pVROverlay && g_hVROverlay != vr::k_ulOverlayHandleInvalid) {
         return true;
+    }
+
+    // Splashscreen guard for initial connection ONLY:
+    // Only connect if user requested HUD (g_hudVisible) or if 3D frames are running or if 15s elapsed
+    static uint64_t s_bootTick = 0;
+    if (s_bootTick == 0) s_bootTick = GetTickCount64();
+
+    if (!g_hudVisible && g_evalFrameCounter < 5 && (GetTickCount64() - s_bootTick < 15000)) {
+        return false;
     }
 
     uint64_t now = GetTickCount64();
@@ -689,6 +861,16 @@ static bool EnsureOpenVROverlay()
         }
         g_openvrInitialized = true;
         LogMsg("[OpenVR-Overlay] Successfully connected to SteamVR Compositor (VRApplication_Overlay)");
+
+        // Query native HMD refresh rate from SteamVR
+        vr::ETrackedPropertyError propErr = vr::TrackedProp_Success;
+        float freq = pSys->GetFloatTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_DisplayFrequency_Float, &propErr);
+        if (propErr == vr::TrackedProp_Success && freq >= 60.0f && freq <= 240.0f) {
+            g_liveHz = (int)(freq + 0.5f);
+            char hzBuf[128];
+            sprintf_s(hzBuf, sizeof(hzBuf), "[OpenVR-Overlay] Native HMD refresh rate detected: %d Hz", g_liveHz);
+            LogMsg(hzBuf);
+        }
     }
 
     if (!g_pVROverlay) {
@@ -707,7 +889,7 @@ static bool EnsureOpenVROverlay()
             LogMsg(buf);
             return false;
         }
-        g_pVROverlay->SetOverlayAlpha(g_hVROverlay, 0.95f);
+        g_pVROverlay->SetOverlayAlpha(g_hVROverlay, 0.96f);
         LogMsg("[OpenVR-Overlay] SteamVR Overlay created and armed successfully!");
     }
 
@@ -716,25 +898,18 @@ static bool EnsureOpenVROverlay()
 
 static void UpdateOpenVROverlay(bool visible, bool isDirty)
 {
-    static bool s_lastVRVisible = false;
+    if (!visible) {
+        if (g_pVROverlay && g_hVROverlay != vr::k_ulOverlayHandleInvalid) {
+            g_pVROverlay->HideOverlay(g_hVROverlay);
+        }
+        return;
+    }
 
     if (!EnsureOpenVROverlay()) {
         return;
     }
 
-    if (!visible) {
-        if (s_lastVRVisible) {
-            g_pVROverlay->HideOverlay(g_hVROverlay);
-            s_lastVRVisible = false;
-        }
-        return;
-    }
-
-    if (!s_lastVRVisible) {
-        g_pVROverlay->ShowOverlay(g_hVROverlay);
-        s_lastVRVisible = true;
-        isDirty = true;
-    }
+    g_pVROverlay->ShowOverlay(g_hVROverlay);
 
     static int s_lastScale = -1;
     static int s_lastPos = -1;
@@ -742,28 +917,29 @@ static void UpdateOpenVROverlay(bool visible, bool isDirty)
         s_lastScale = g_hudScale;
         s_lastPos = g_hudPosIndex;
 
-        float widthInMeters = 0.48f;
-        if (g_hudScale == 0) widthInMeters = 0.38f;      // 1.0x Compact / Pimax
-        else if (g_hudScale == 1) widthInMeters = 0.48f; // 1.5x Balanced (Quest 3 / Pimax Default)
-        else if (g_hudScale == 2) widthInMeters = 0.60f; // 2.0x Comfort
+        // Finer, more compact physical size in VR for high-DPI Pimax / Quest 3
+        float widthInMeters = 0.22f;
+        if (g_hudScale == 0) widthInMeters = 0.22f;      // 1.0x Compact / Pimax Fin
+        else if (g_hudScale == 1) widthInMeters = 0.28f; // 1.5x Equilibre
+        else if (g_hudScale == 2) widthInMeters = 0.36f; // 2.0x Confort
         g_pVROverlay->SetOverlayWidthInMeters(g_hVROverlay, widthInMeters);
 
         float posX = 0.0f;
-        float posY = -0.25f; // Sweet spot bas (fpsVR / dashboard)
-        float posZ = -0.80f; // 80 cm de distance
+        float posY = -0.22f; // Sweet spot bas (fpsVR / dashboard)
+        float posZ = -0.75f; // 75 cm de distance
 
         switch (g_hudPosIndex % 4) {
         case 0: // Bas-Centre
-            posX = 0.0f; posY = -0.25f; posZ = -0.80f;
+            posX = 0.0f; posY = -0.22f; posZ = -0.75f;
             break;
         case 1: // Haut-Centre
-            posX = 0.0f; posY = +0.22f; posZ = -0.80f;
+            posX = 0.0f; posY = +0.20f; posZ = -0.75f;
             break;
         case 2: // Haut-Droite
-            posX = +0.28f; posY = +0.18f; posZ = -0.80f;
+            posX = +0.26f; posY = +0.16f; posZ = -0.75f;
             break;
         case 3: // Haut-Gauche
-            posX = -0.28f; posY = +0.18f; posZ = -0.80f;
+            posX = -0.26f; posY = +0.16f; posZ = -0.75f;
             break;
         }
 
@@ -779,7 +955,7 @@ static void UpdateOpenVROverlay(bool visible, bool isDirty)
     }
 
     if (isDirty) {
-        g_pVROverlay->SetOverlayRaw(g_hVROverlay, s_hudPixels, HUD_WIDTH, HUD_HEIGHT, 4);
+        g_pVROverlay->SetOverlayRaw(g_hVROverlay, s_hudPixelsVR, HUD_WIDTH, HUD_HEIGHT, 4);
     }
 }
 
@@ -936,7 +1112,7 @@ static void PollInput()
     }
     s_prevPadR3 = padR3;
 
-    // Navigate Rows (5 rows: 0 to 4) - PURE DIGITAL D-PAD (pas de parasitage par le stick analogique)
+    // Navigate Rows (6 rows: 0 to 5) - PURE DIGITAL D-PAD (pas de parasitage par le stick analogique)
     static bool s_prevPadUp = false;
     static bool s_prevPadDown = false;
     bool padUp = ((xButtons & XINPUT_GAMEPAD_DPAD_UP) != 0) || 
@@ -945,11 +1121,11 @@ static void PollInput()
                    (dinputConnected && (jie.dwPOV == 18000 || jie.dwPOV == 13500 || jie.dwPOV == 22500));
 
     if (g_keys[VK_UP].justPressed || (padUp && !s_prevPadUp)) {
-        g_activeRow = (g_activeRow + 4) % 5;
+        g_activeRow = (g_activeRow + 5) % 6;
         g_hudDirty = true;
     }
     if (g_keys[VK_DOWN].justPressed || (padDown && !s_prevPadDown)) {
-        g_activeRow = (g_activeRow + 1) % 5;
+        g_activeRow = (g_activeRow + 1) % 6;
         g_hudDirty = true;
     }
     s_prevPadUp = padUp;
@@ -1034,7 +1210,16 @@ static void PollInput()
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 4) { // UI Scale (1.0x, 1.5x, 2.0x)
+    else if (g_activeRow == 4) { // HUD Position (0: Bas-Centre, 1: Haut-Centre, 2: Haut-Droite, 3: Haut-Gauche)
+        if (actionTrigger || actRight) {
+            g_hudPosIndex = (g_hudPosIndex + 1) % 4;
+            valueChanged = true;
+        } else if (actLeft) {
+            g_hudPosIndex = (g_hudPosIndex + 3) % 4;
+            valueChanged = true;
+        }
+    }
+    else if (g_activeRow == 5) { // VR Scale (0: 1.0x Compact, 1: 1.5x Equilibre, 2: 2.0x Confort)
         if (actionTrigger || actRight) {
             g_hudScale = (g_hudScale + 1) % 3;
             valueChanged = true;
@@ -1075,21 +1260,12 @@ static int g_currentOSDScale = -1;
 
 static void UpdateOSDWindow(bool visible, bool isDirty)
 {
-    static bool s_lastVisible = false;
     if (!visible) {
-        if (s_lastVisible) {
-            if (g_hOSDWnd && IsWindowVisible(g_hOSDWnd)) {
-                ShowWindow(g_hOSDWnd, SW_HIDE);
-            }
-            s_lastVisible = false;
+        if (g_hOSDWnd && IsWindowVisible(g_hOSDWnd)) {
+            ShowWindow(g_hOSDWnd, SW_HIDE);
         }
         return;
     }
-
-    if (!isDirty && s_lastVisible) {
-        return; // Zero CPU / GDI / DWM work when HUD is static
-    }
-    s_lastVisible = true;
 
     // 1. Enregistrer la classe de fenêtre
     static bool s_classRegistered = false;
@@ -1113,10 +1289,14 @@ static void UpdateOSDWindow(bool visible, bool isDirty)
         if (!g_hOSDWnd) return;
     }
 
-    // 3. Déterminer les dimensions actuelles selon l'échelle (1.0x, 1.5x, 2.0x)
+    if (!isDirty && IsWindowVisible(g_hOSDWnd)) {
+        return; // Zero CPU / GDI work when HUD is static
+    }
+
+    // 3. Déterminer les dimensions actuelles selon l'échelle desktop (1.0x, 1.25x, 1.5x)
     int scaleNum = 1, scaleDen = 1;
-    if (g_hudScale == 1) { scaleNum = 3; scaleDen = 2; }
-    else if (g_hudScale == 2) { scaleNum = 2; scaleDen = 1; }
+    if (g_hudScale == 1) { scaleNum = 5; scaleDen = 4; }
+    else if (g_hudScale == 2) { scaleNum = 3; scaleDen = 2; }
     int curW = (HUD_WIDTH * scaleNum) / scaleDen;
     int curH = (HUD_HEIGHT * scaleNum) / scaleDen;
 
@@ -1144,7 +1324,7 @@ static void UpdateOSDWindow(bool visible, bool isDirty)
 
     if (!g_pOSDBits) return;
 
-    // 5. Transférer avec alpha prémultiplié pour UpdateLayeredWindow (s_hudPixels déjà dessiné)
+    // 5. Transférer avec alpha prémultiplié pour UpdateLayeredWindow
     for (int y = 0; y < curH; y++) {
         int srcY = (y * scaleDen) / scaleNum;
         if (srcY >= HUD_HEIGHT) srcY = HUD_HEIGHT - 1;
@@ -1152,16 +1332,11 @@ static void UpdateOSDWindow(bool visible, bool isDirty)
         for (int x = 0; x < curW; x++) {
             int srcX = (x * scaleDen) / scaleNum;
             if (srcX >= HUD_WIDTH) srcX = HUD_WIDTH - 1;
-            HUDColor c = s_hudPixels[srcY][srcX];
-            uint32_t a = c.a;
-            uint32_t r = (c.r * a) / 255;
-            uint32_t g = (c.g * a) / 255;
-            uint32_t b = (c.b * a) / 255;
-            pDstRow[x] = (a << 24) | (r << 16) | (g << 8) | b;
+            pDstRow[x] = s_hudPixelsOSD[srcY * HUD_WIDTH + srcX];
         }
     }
 
-    // 7. Calculer la position sur l'écran principal (garantit visibilité fixe et stable)
+    // 6. Calculer la position sur l'écran principal
     int scrW = GetSystemMetrics(SM_CXSCREEN);
     int scrH = GetSystemMetrics(SM_CYSCREEN);
     if (scrW <= 0) scrW = 1920;
@@ -1215,7 +1390,13 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         if (vRef >= 60 && vRef <= 240) g_liveHz = vRef;
     }
 
+    // Initialize the offscreen GDI rasterizer DC and DIB section
+    InitGDIRasterizer();
+
     LogMsg("[Proxy] Input Watcher Thread ready: polling F6 and Select+L3...");
+
+    static uint64_t s_lastPulseTick = 0;
+    static int s_pulsePhase = 0;
 
     while (true)
     {
@@ -1230,10 +1411,20 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         // 3. Écouter les entrées clavier (F6) et manettes (Select+L3)
         PollInput();
 
+        // Animation du heartbeat dot toutes les 500 ms lorsque le HUD est affiché
+        if (g_hudVisible) {
+            if (now - s_lastPulseTick >= 500) {
+                s_lastPulseTick = now;
+                s_pulsePhase++;
+                g_hudDirty = true;
+            }
+        }
+
         // 4. Mettre à jour les affichages Bureau et Casque VR
         bool isDirty = g_hudDirty;
         if (g_hudVisible && isDirty) {
-            RenderHUD(g_masterEnable, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_activeRow, g_hudPosIndex, g_liveHz);
+            RenderModernHUD(g_hGdiMemDC, g_pGdiBits, g_masterEnable, g_nrIntensity, g_nrGlobalTone, 
+                            g_nrPreset, g_hudPosIndex, g_hudScale, g_activeRow, g_liveHz, s_pulsePhase);
         }
         UpdateOSDWindow(g_hudVisible, isDirty);
         UpdateOpenVROverlay(g_hudVisible, isDirty);
