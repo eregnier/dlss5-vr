@@ -449,7 +449,7 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     // 4. Header Bar: Title
     SelectObject(hdc, hFontTitle);
     SetTextColor(hdc, RGB(0, 220, 255));
-    TextOutA(hdc, 16, 8, "DLSS 5 NEURAL RECON", 19);
+    TextOutA(hdc, 16, 8, "DLSS 5 <> VR", 12);
 
     // Solid Glowing Neon Green Dot (Rock-solid, no periodic blinking to prevent VR flicker)
     HBRUSH hBrushDot = CreateSolidBrush(RGB(0, 255, 140));
