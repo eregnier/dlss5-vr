@@ -1,4 +1,4 @@
-#define WIN32_LEAN_AND_MEAN
+﻿#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -30,6 +30,7 @@
 #define IDC_BTN_REFRESH     1005
 #define IDC_STATIC_STATUS   1006
 #define IDC_EDIT_LOG        1007
+#define IDC_PROGRESS_BAR    1008
 
 HWND g_hMainWnd = NULL;
 HWND g_hEditPath = NULL;
@@ -38,6 +39,7 @@ HWND g_hBtnInstall = NULL;
 HWND g_hBtnRestore = NULL;
 HWND g_hBtnRefresh = NULL;
 HWND g_hStaticStatus = NULL;
+HWND g_hProgressBar = NULL;
 HWND g_hEditLog = NULL;
 HFONT g_hFontTitle = NULL;
 HFONT g_hFontNormal = NULL;
@@ -54,6 +56,15 @@ std::wstring g_dlssVersionStr = L"";
 bool g_isGameRunning = false;
 std::wstring g_runningProcessName = L"";
 
+void ProcessWindowMessages()
+{
+    MSG msg;
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
 void AppendLog(const std::wstring& text)
 {
     if (!g_hEditLog) return;
@@ -63,11 +74,25 @@ void AppendLog(const std::wstring& text)
     SendMessageW(g_hEditLog, EM_REPLACESEL, 0, (LPARAM)L"\r\n");
     SendMessageW(g_hEditLog, EM_SCROLLCARET, 0, 0);
 
-    // Pump window messages so UI stays responsive during downloads
-    MSG msg;
-    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    ProcessWindowMessages();
+}
+
+void SetProgressVisible(bool visible)
+{
+    if (g_hProgressBar) {
+        ShowWindow(g_hProgressBar, visible ? SW_SHOW : SW_HIDE);
+        if (visible) {
+            SendMessageW(g_hProgressBar, PBM_SETRANGE32, 0, 100);
+            SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
+        }
+    }
+}
+
+void SetProgressPercent(int pct)
+{
+    if (g_hProgressBar) {
+        SendMessageW(g_hProgressBar, PBM_SETPOS, (WPARAM)pct, 0);
+        ProcessWindowMessages();
     }
 }
 
@@ -150,10 +175,13 @@ bool KillRunningGame(const std::wstring& exeName)
 bool DownloadHttpFile(const std::wstring& url, const std::wstring& destFile, const std::wstring& label)
 {
     AppendLog(L"[DOWNLOAD] Initiating download: " + label);
+    SetProgressVisible(true);
+    SetProgressPercent(0);
 
     HINTERNET hInternet = InternetOpenW(L"VR-DLSS5-Installer/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
     if (!hInternet) {
         AppendLog(L"[ERROR] Failed to open Internet handle.");
+        SetProgressVisible(false);
         return false;
     }
 
@@ -162,6 +190,7 @@ bool DownloadHttpFile(const std::wstring& url, const std::wstring& destFile, con
     if (!hUrl) {
         InternetCloseHandle(hInternet);
         AppendLog(L"[ERROR] Failed to connect to URL: " + url);
+        SetProgressVisible(false);
         return false;
     }
 
@@ -175,6 +204,7 @@ bool DownloadHttpFile(const std::wstring& url, const std::wstring& destFile, con
         InternetCloseHandle(hUrl);
         InternetCloseHandle(hInternet);
         AppendLog(L"[ERROR] Failed to create destination file: " + destFile);
+        SetProgressVisible(false);
         return false;
     }
 
@@ -192,7 +222,8 @@ bool DownloadHttpFile(const std::wstring& url, const std::wstring& destFile, con
         DWORD now = GetTickCount();
         if (contentLength > 0) {
             DWORD pct = (DWORD)(((__int64)totalDownloaded * 100) / contentLength);
-            if (pct >= lastReportPct + 10 || (now - lastReportTick) > 1500) {
+            SetProgressPercent((int)pct);
+            if (pct >= lastReportPct + 5 || (now - lastReportTick) > 1000) {
                 lastReportPct = pct;
                 lastReportTick = now;
                 wchar_t logBuf[256];
@@ -201,7 +232,7 @@ bool DownloadHttpFile(const std::wstring& url, const std::wstring& destFile, con
                 AppendLog(logBuf);
             }
         } else {
-            if ((now - lastReportTick) > 2000) {
+            if ((now - lastReportTick) > 1500) {
                 lastReportTick = now;
                 wchar_t logBuf[256];
                 swprintf_s(logBuf, L"[DOWNLOAD] %s: %.1f MB downloaded...", label.c_str(), (float)totalDownloaded / (1024.0f * 1024.0f));
@@ -214,7 +245,9 @@ bool DownloadHttpFile(const std::wstring& url, const std::wstring& destFile, con
     InternetCloseHandle(hUrl);
     InternetCloseHandle(hInternet);
 
-    AppendLog(L"[DOWNLOAD] Completed: " + label);
+    SetProgressPercent(100);
+    AppendLog(L"[DOWNLOAD] Completed successfully: " + label);
+    SetProgressVisible(false);
     return true;
 }
 
@@ -266,6 +299,8 @@ std::wstring FindOrDownloadComponent(const std::wstring& fileName)
         std::wstring(exePath) + L"\\deps",
         std::wstring(exePath) + L"\\..\\deps",
         GetCacheDirectory(),
+        L"C:\\code\\dlss5-vr\\proxy",
+        L"C:\\code\\dlss5-vr\\deps",
         L"C:\\code\\vrdlss5\\proxy",
         L"C:\\code\\vrdlss5\\deps"
     };
@@ -637,13 +672,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 480, 280, 100, 36, hWnd, (HMENU)IDC_BTN_REFRESH, NULL, NULL);
         SendMessageW(g_hBtnRefresh, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
+        // Native Windows Progress Bar (Smooth animated)
+        g_hProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
+            WS_CHILD | PBS_SMOOTH, 20, 325, 560, 16, hWnd, (HMENU)IDC_PROGRESS_BAR, NULL, NULL);
+        ShowWindow(g_hProgressBar, SW_HIDE);
+
         HWND hLblLog = CreateWindowW(L"STATIC", L"Activity Log:",
-            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 325, 200, 18, hWnd, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 348, 200, 18, hWnd, NULL, NULL, NULL);
         SendMessageW(hLblLog, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hEditLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-            20, 345, 560, 150, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
+            20, 368, 560, 130, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
         SendMessageW(g_hEditLog, WM_SETFONT, (WPARAM)g_hFontMono, TRUE);
 
         AppendLog(L"DLSS 5 <> VR Universal Installer ready.");
@@ -742,7 +782,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES;
+    icex.dwICC = ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_PROGRESS_CLASS;
     InitCommonControlsEx(&icex);
 
     g_hFontTitle = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
@@ -762,7 +802,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     RegisterClassExW(&wc);
 
     int w = 620;
-    int h = 550;
+    int h = 555;
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenW - w) / 2;
