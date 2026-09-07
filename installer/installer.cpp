@@ -756,37 +756,37 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SendMessageW(g_hBtnBrowse, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         HWND hGrp = CreateWindowW(L"BUTTON", L"Diagnostics & Detection",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, 20, 130, 560, 140, hWnd, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, 20, 130, 560, 160, hWnd, NULL, NULL, NULL);
         SendMessageW(hGrp, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hStaticStatus = CreateWindowW(L"STATIC", L"Status: Please select a game executable (*.exe)...",
-            WS_VISIBLE | WS_CHILD | SS_LEFT, 35, 152, 530, 110, hWnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | SS_LEFT, 35, 150, 530, 132, hWnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
         SendMessageW(g_hStaticStatus, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hBtnInstall = CreateWindowW(L"BUTTON", L"Install / Update DLSS 5",
-            WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | WS_DISABLED, 20, 280, 200, 36, hWnd, (HMENU)IDC_BTN_INSTALL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | WS_DISABLED, 20, 302, 200, 36, hWnd, (HMENU)IDC_BTN_INSTALL, NULL, NULL);
         SendMessageW(g_hBtnInstall, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hBtnRestore = CreateWindowW(L"BUTTON", L"Restore LukeRoss Vanilla",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED, 230, 280, 200, 36, hWnd, (HMENU)IDC_BTN_RESTORE, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED, 230, 302, 200, 36, hWnd, (HMENU)IDC_BTN_RESTORE, NULL, NULL);
         SendMessageW(g_hBtnRestore, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hBtnRefresh = CreateWindowW(L"BUTTON", L"Refresh",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 480, 280, 100, 36, hWnd, (HMENU)IDC_BTN_REFRESH, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 480, 302, 100, 36, hWnd, (HMENU)IDC_BTN_REFRESH, NULL, NULL);
         SendMessageW(g_hBtnRefresh, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         // Native Windows Progress Bar (Smooth animated)
         g_hProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
-            WS_CHILD | PBS_SMOOTH, 20, 325, 560, 16, hWnd, (HMENU)IDC_PROGRESS_BAR, NULL, NULL);
+            WS_CHILD | PBS_SMOOTH, 20, 347, 560, 16, hWnd, (HMENU)IDC_PROGRESS_BAR, NULL, NULL);
         ShowWindow(g_hProgressBar, SW_HIDE);
 
         HWND hLblLog = CreateWindowW(L"STATIC", L"Activity Log:",
-            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 348, 200, 18, hWnd, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 370, 200, 18, hWnd, NULL, NULL, NULL);
         SendMessageW(hLblLog, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hEditLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-            20, 368, 560, 130, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
+            20, 390, 560, 150, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
         SendMessageW(g_hEditLog, WM_SETFONT, (WPARAM)g_hFontMono, TRUE);
 
         AppendLog(std::wstring(L"DLSS 5 <> VR Universal Installer v") + CURRENT_VERSION_STR + L" ready.");
@@ -902,7 +902,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     RegisterClassExW(&wc);
 
     int w = 620;
-    int h = 555;
+    int h = 600;
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenW - w) / 2;
