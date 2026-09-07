@@ -440,7 +440,7 @@ static bool g_hudDirty = true;
 static bool g_masterEnable = true;
 static float g_nrIntensity = 2.50f;
 static float g_nrGlobalTone = 1.00f;
-static int g_nrPreset = 0;
+static int g_nrPreset = 2; // Default: Preset 2 [Performance] for high-FPS VR
 static int g_hudScale = 0; // 0: 1.0x (Compact / Pimax Fin), 1: 1.5x (Equilibre), 2: 2.0x (Confort)
 static int g_activeRow = 0; // 0 to 5
 static int g_hudPosIndex = 0; // 0: Bas-Centre, 1: Haut-Centre, 2: Haut-Droite, 3: Haut-Gauche
@@ -504,7 +504,14 @@ static void InitVariablesFromAddonOrIni()
             if (g_nrIntensity > 10.0f) g_nrIntensity = 2.50f;
         }
         if (g_nrGlobalTone <= 0.0f || g_nrGlobalTone > 5.0f) g_nrGlobalTone = 1.00f;
-        if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 0;
+
+        // Load Preset from INI (default: 2 - Performance preset)
+        g_nrPreset = GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 2, g_iniPath);
+        if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 2;
+
+        // Apply Performance preset to addon RAM immediately
+        *(int32_t*)(g_renodxBase + 0x196B98) = g_nrPreset;
+        *(int32_t*)(g_renodxBase + 0x196C2C) = g_nrPreset;
 
         // Load scale & position from INI (default: 1.5x for Quest 3 comfort)
         g_hudScale = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDScale", 1, g_iniPath);
@@ -516,7 +523,7 @@ static void InitVariablesFromAddonOrIni()
         g_varsInitialized = true;
         char buf[256];
         sprintf_s(buf, sizeof(buf), 
-            "[VR-DLSS5-HUD] Initialized: Enable=%d, Intensity=%.2f, Tone=%.2f, Preset=%d, Scale=%d, Pos=%d",
+            "[VR-DLSS5-HUD] Initialized: Enable=%d, Intensity=%.2f, Tone=%.2f, Preset=%d (Performance), Scale=%d, Pos=%d",
             g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_hudPosIndex);
         LogMsg(buf);
     }
@@ -524,29 +531,23 @@ static void InitVariablesFromAddonOrIni()
 
 static void CommitSettingsToDisk()
 {
-    char valStr[64];
-    WritePrivateProfileStringA("RenoDX.DLSS5", "EnableHooks", "1", g_iniPath);
+    // High-performance single-pass section serialization (replaces 6 separate file opens/parses)
+    char secBuf[512];
+    int offset = 0;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "EnableHooks=1") + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRIntensity=%.2f", g_masterEnable ? g_nrIntensity : 0.0f) + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRGlobalTone=%.2f", g_nrGlobalTone) + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRPreset=%d", g_nrPreset) + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDScale=%d", g_hudScale) + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDPosition=%d", g_hudPosIndex) + 1;
+    secBuf[offset] = '\0'; // Double null terminator for WritePrivateProfileSectionA
 
-    float effectiveIntensity = g_masterEnable ? g_nrIntensity : 0.0f;
-    sprintf_s(valStr, sizeof(valStr), "%.2f", effectiveIntensity);
-    WritePrivateProfileStringA("RenoDX.DLSS5", "NRIntensity", valStr, g_iniPath);
-
-    sprintf_s(valStr, sizeof(valStr), "%.2f", g_nrGlobalTone);
-    WritePrivateProfileStringA("RenoDX.DLSS5", "NRGlobalTone", valStr, g_iniPath);
-
-    sprintf_s(valStr, sizeof(valStr), "%d", g_nrPreset);
-    WritePrivateProfileStringA("RenoDX.DLSS5", "NRPreset", valStr, g_iniPath);
-
-    sprintf_s(valStr, sizeof(valStr), "%d", g_hudScale);
-    WritePrivateProfileStringA("RenoDX.DLSS5", "HUDScale", valStr, g_iniPath);
-
-    sprintf_s(valStr, sizeof(valStr), "%d", g_hudPosIndex);
-    WritePrivateProfileStringA("RenoDX.DLSS5", "HUDPosition", valStr, g_iniPath);
+    WritePrivateProfileSectionA("RenoDX.DLSS5", secBuf, g_iniPath);
 
     char logBuf[256];
     sprintf_s(logBuf, sizeof(logBuf), 
-        "[VR-DLSS5-HUD] 500ms Debounce Save committed: Enable=%d, Int=%.2f, Tone=%.2f, Preset=%d, Scale=%d -> %s",
-        g_masterEnable ? 1 : 0, effectiveIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_iniPath);
+        "[VR-DLSS5-HUD] 500ms Debounce Save committed (single-pass): Enable=%d, Int=%.2f, Tone=%.2f, Preset=%d, Scale=%d -> %s",
+        g_masterEnable ? 1 : 0, g_masterEnable ? g_nrIntensity : 0.0f, g_nrGlobalTone, g_nrPreset, g_hudScale, g_iniPath);
     LogMsg(logBuf);
 }
 
@@ -848,36 +849,39 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     DeleteObject(hFontBadge);
     DeleteObject(hFontHelp);
 
-    // 7. Alpha channel post-processing for both Desktop (OSD) and VR (OpenVR)
+    // 7. Fast Alpha channel post-processing for both Desktop (OSD) and VR (OpenVR)
     for (int y = 0; y < HUD_HEIGHT; y++) {
+        int rowIdx = y * HUD_WIDTH;
         for (int x = 0; x < HUD_WIDTH; x++) {
-            int idx = y * HUD_WIDTH + x;
+            int idx = rowIdx + x;
             uint32_t px = pGdiBits[idx];
             uint8_t b = (uint8_t)(px & 0xFF);
             uint8_t g = (uint8_t)((px >> 8) & 0xFF);
             uint8_t r = (uint8_t)((px >> 16) & 0xFF);
 
-            uint8_t a = 0;
-            if (r > 0 || g > 0 || b > 0) {
+            uint32_t a = 0;
+            uint32_t pr, pg, pb;
+            if (r | g | b) {
                 if (r <= 20 && g <= 24 && b <= 32) {
                     a = 230; // 90% translucent dark background
+                    pr = (r * 230) >> 8;
+                    pg = (g * 230) >> 8;
+                    pb = (b * 230) >> 8;
                 } else {
                     a = 255; // 100% solid for text, neon borders, sliders, badges
+                    pr = r;
+                    pg = g;
+                    pb = b;
                 }
+            } else {
+                pr = 0; pg = 0; pb = 0;
             }
 
             // Premultiplied BGRA for Windows UpdateLayeredWindow
-            uint32_t pr = (r * a) / 255;
-            uint32_t pg = (g * a) / 255;
-            uint32_t pb = (b * a) / 255;
-            s_hudPixelsOSD[idx] = ((uint32_t)a << 24) | (pr << 16) | (pg << 8) | pb;
+            s_hudPixelsOSD[idx] = (a << 24) | (pr << 16) | (pg << 8) | pb;
 
-            // Straight RGBA for OpenVR SetOverlayRaw
-            int vrIdx = idx * 4;
-            s_hudPixelsVR[vrIdx + 0] = r;
-            s_hudPixelsVR[vrIdx + 1] = g;
-            s_hudPixelsVR[vrIdx + 2] = b;
-            s_hudPixelsVR[vrIdx + 3] = a;
+            // Straight RGBA for OpenVR SetOverlayRaw (direct 32-bit dword write)
+            *(uint32_t*)&s_hudPixelsVR[idx * 4] = (a << 24) | ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
         }
     }
 }
@@ -1641,6 +1645,29 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
             InstallXInputHooks();
         }
 
+        // Mesurer le framerate reel de maniere 100% asynchrone sans surcharger le thread de rendu
+        static uint64_t s_lastFpsMeasureTick = 0;
+        static unsigned long long s_lastFpsFrameCount = 0;
+        if (s_lastFpsMeasureTick == 0) s_lastFpsMeasureTick = now;
+        if (now - s_lastFpsMeasureTick >= 1000)
+        {
+            uint64_t elapsed = now - s_lastFpsMeasureTick;
+            unsigned long long curFrames = g_evalFrameCounter;
+            if (elapsed > 0 && curFrames >= s_lastFpsFrameCount)
+            {
+                int measuredFps = (int)((curFrames - s_lastFpsFrameCount) * 1000 / elapsed);
+                if (measuredFps > 0 && measuredFps <= 240)
+                {
+                    if (abs(measuredFps - g_liveHz) > 2) {
+                        g_liveHz = measuredFps;
+                        if (g_hudVisible) g_hudDirty = true;
+                    }
+                }
+            }
+            s_lastFpsFrameCount = curFrames;
+            s_lastFpsMeasureTick = now;
+        }
+
         // 3. Écouter les entrées clavier (F6) et manettes (Select+L3)
         PollInput();
 
@@ -1675,57 +1702,14 @@ extern "C" {
 
 int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback)
 {
-    InitProxy();
-
     g_evalFrameCounter++;
 
-    // 1. Toujours exécuter l'évaluation DLSS native de LukeRoss (RealVR64)
-    int result = 0;
+    // Ultra-lean zero-overhead pass-through (zero disk I/O, zero string serialization, zero FP math)
     if (g_pfnNGXEvaluateFeature)
     {
-        result = g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
+        return g_pfnNGXEvaluateFeature(pCmdList, pHandle, pParameters, pCallback);
     }
-
-    // 2. Synchronisation de la mémoire et lecture paresseuse des variables
-    InitVariablesFromAddonOrIni();
-
-    // 3. Calcul dynamique du taux de rafraîchissement VR (72Hz, 80Hz, 90Hz, 120Hz)
-    uint64_t now = GetTickCount64();
-    static uint64_t s_lastFrameTick = 0;
-    static float s_smoothedFps = 72.0f;
-    if (s_lastFrameTick > 0)
-    {
-        uint64_t delta = now - s_lastFrameTick;
-        if (delta > 0 && delta < 500)
-        {
-            float instantFps = 1000.0f / (float)delta;
-            s_smoothedFps = s_smoothedFps * 0.95f + instantFps * 0.05f;
-        }
-    }
-    s_lastFrameTick = now;
-
-    int displayHz = (int)(s_smoothedFps + 0.5f);
-    if (abs(displayHz - 72) <= 3) displayHz = 72;
-    else if (abs(displayHz - 80) <= 3) displayHz = 80;
-    else if (abs(displayHz - 90) <= 3) displayHz = 90;
-    else if (abs(displayHz - 120) <= 3) displayHz = 120;
-    g_liveHz = displayHz;
-
-
-
-    // D3D12 inline blit disabled to guarantee 100% crash-free stability
-    // VR display will use clean OpenVR Overlay (fpsVR style)
-
-    // 7. Télémétrie de synchronisation continue
-    if ((g_evalFrameCounter % 200) == 1 || g_evalFrameCounter <= 20)
-    {
-        char buf[256];
-        sprintf_s(buf, sizeof(buf), "[VR-DLSS5-Telemetry] Continuous VR frame #%llu: gameHandle=%p, eval_ret=0x%08X", 
-            g_evalFrameCounter, pHandle, result);
-        LogMsg(buf);
-    }
-
-    return result;
+    return 0;
 }
 
 

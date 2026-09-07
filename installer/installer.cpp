@@ -661,7 +661,8 @@ void DoInstall()
     wchar_t iniPath[MAX_PATH];
     PathCombineW(iniPath, g_targetDir.c_str(), L"ReShade.ini");
     WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NeuralUplift", L"1", iniPath);
-    AppendLog(L"[CONFIG] Configured ReShade.ini: [RenoDX.DLSS5] NeuralUplift=1");
+    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NRPreset", L"2", iniPath);
+    AppendLog(L"[CONFIG] Configured ReShade.ini: [RenoDX.DLSS5] NeuralUplift=1, NRPreset=2 (Performance)");
 
     AppendLog(L"[SUCCESS] Installation finished successfully!");
     AppendLog(L"----------------------------------------------------------------------");
