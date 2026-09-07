@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -22,6 +22,11 @@
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
+// Version Constants
+#define CURRENT_VERSION_STR L"1.0.0"
+#define UPDATE_CHECK_URL    L"https://raw.githubusercontent.com/eregnier/dlss5-vr/main/VERSION"
+#define GITHUB_RELEASES_URL L"https://github.com/eregnier/dlss5-vr/releases"
+
 // Control IDs
 #define IDC_EDIT_PATH       1001
 #define IDC_BTN_BROWSE      1002
@@ -31,6 +36,7 @@
 #define IDC_STATIC_STATUS   1006
 #define IDC_EDIT_LOG        1007
 #define IDC_PROGRESS_BAR    1008
+#define IDC_BTN_UPDATE      1009
 
 HWND g_hMainWnd = NULL;
 HWND g_hEditPath = NULL;
@@ -38,6 +44,7 @@ HWND g_hBtnBrowse = NULL;
 HWND g_hBtnInstall = NULL;
 HWND g_hBtnRestore = NULL;
 HWND g_hBtnRefresh = NULL;
+HWND g_hBtnUpdate = NULL;
 HWND g_hStaticStatus = NULL;
 HWND g_hProgressBar = NULL;
 HWND g_hEditLog = NULL;
@@ -170,6 +177,102 @@ bool KillRunningGame(const std::wstring& exeName)
     CloseHandle(hSnap);
     Sleep(1000);
     return killed;
+}
+
+std::wstring FetchRemoteText(const std::wstring& url)
+{
+    HINTERNET hInternet = InternetOpenW(L"VR-DLSS5-Installer/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    if (!hInternet) return L"";
+
+    DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_SECURE;
+    HINTERNET hUrl = InternetOpenUrlW(hInternet, url.c_str(), NULL, 0, flags, 0);
+    if (!hUrl) {
+        InternetCloseHandle(hInternet);
+        return L"";
+    }
+
+    std::string result = "";
+    char buffer[1024];
+    DWORD bytesRead = 0;
+
+    while (InternetReadFile(hUrl, buffer, sizeof(buffer) - 1, &bytesRead) && bytesRead > 0) {
+        buffer[bytesRead] = '\0';
+        result += buffer;
+    }
+
+    InternetCloseHandle(hUrl);
+    InternetCloseHandle(hInternet);
+
+    size_t start = result.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return L"";
+    size_t end = result.find_last_not_of(" \t\r\n");
+    std::string trimmed = result.substr(start, end - start + 1);
+
+    return std::wstring(trimmed.begin(), trimmed.end());
+}
+
+bool ParseSemVer(const std::wstring& ver, int& major, int& minor, int& patch)
+{
+    major = minor = patch = 0;
+    const wchar_t* p = ver.c_str();
+    if (*p == L'v' || *p == L'V') p++;
+    if (swscanf_s(p, L"%d.%d.%d", &major, &minor, &patch) >= 1) {
+        return true;
+    }
+    return false;
+}
+
+int CompareSemVer(const std::wstring& v1, const std::wstring& v2)
+{
+    int maj1 = 0, min1 = 0, pat1 = 0;
+    int maj2 = 0, min2 = 0, pat2 = 0;
+    ParseSemVer(v1, maj1, min1, pat1);
+    ParseSemVer(v2, maj2, min2, pat2);
+
+    if (maj1 != maj2) return (maj1 > maj2) ? 1 : -1;
+    if (min1 != min2) return (min1 > min2) ? 1 : -1;
+    if (pat1 != pat2) return (pat1 > pat2) ? 1 : -1;
+    return 0;
+}
+
+void DoCheckUpdate()
+{
+    AppendLog(L"----------------------------------------------------------------------");
+    AppendLog(L"[UPDATE] Checking for updates online...");
+    AppendLog(std::wstring(L"[UPDATE] Current version: v") + CURRENT_VERSION_STR);
+    AppendLog(std::wstring(L"[UPDATE] Checking: ") + UPDATE_CHECK_URL);
+
+    std::wstring remoteVer = FetchRemoteText(UPDATE_CHECK_URL);
+    if (remoteVer.empty()) {
+        AppendLog(L"[UPDATE] Unable to reach update server or repository not yet published on GitHub.");
+        MessageBoxW(g_hMainWnd,
+            L"Could not check for updates online.\n(The GitHub repository https://github.com/eregnier/dlss5-vr might not be published yet or you are offline).",
+            L"Update Check", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    AppendLog(L"[UPDATE] Latest remote version: v" + remoteVer);
+
+    if (CompareSemVer(remoteVer, CURRENT_VERSION_STR) > 0) {
+        AppendLog(L"[UPDATE] An update is available: v" + remoteVer);
+        std::wstring msg = L"A new version of DLSS 5 <> VR is available!\n\n"
+                           L"Current version : v" + std::wstring(CURRENT_VERSION_STR) + L"\n"
+                           L"Latest version  : v" + remoteVer + L"\n\n"
+                           L"Would you like to open the GitHub Releases page to download it?";
+
+        int res = MessageBoxW(g_hMainWnd, msg.c_str(), L"New Version Available", MB_YESNO | MB_ICONQUESTION);
+        if (res == IDYES) {
+            AppendLog(L"[UPDATE] Opening GitHub Releases page in browser: " + std::wstring(GITHUB_RELEASES_URL));
+            ShellExecuteW(NULL, L"open", GITHUB_RELEASES_URL, NULL, NULL, SW_SHOWNORMAL);
+        } else {
+            AppendLog(L"[UPDATE] User declined opening release page.");
+        }
+    } else {
+        AppendLog(L"[UPDATE] You are running the latest version (v" + std::wstring(CURRENT_VERSION_STR) + L").");
+        MessageBoxW(g_hMainWnd,
+            (L"You are using the latest version of DLSS 5 <> VR (v" + std::wstring(CURRENT_VERSION_STR) + L").").c_str(),
+            L"Up to Date", MB_OK | MB_ICONINFORMATION);
+    }
 }
 
 bool DownloadHttpFile(const std::wstring& url, const std::wstring& destFile, const std::wstring& label)
@@ -633,8 +736,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         DragAcceptFiles(hWnd, TRUE);
 
         HWND hTitle = CreateWindowW(L"STATIC", L"DLSS 5 <> VR — Universal Installer",
-            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 15, 560, 26, hWnd, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 15, 420, 26, hWnd, NULL, NULL, NULL);
         SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hFontTitle, TRUE);
+
+        g_hBtnUpdate = CreateWindowW(L"BUTTON", L"Check Update",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 460, 15, 120, 28, hWnd, (HMENU)IDC_BTN_UPDATE, NULL, NULL);
+        SendMessageW(g_hBtnUpdate, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         HWND hSub = CreateWindowW(L"STATIC", L"Enable DLSS 5 Neural Reconstruction on LukeRoss R.E.A.L. VR Games",
             WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 42, 560, 20, hWnd, NULL, NULL, NULL);
@@ -686,7 +793,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             20, 368, 560, 130, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
         SendMessageW(g_hEditLog, WM_SETFONT, (WPARAM)g_hFontMono, TRUE);
 
-        AppendLog(L"DLSS 5 <> VR Universal Installer ready.");
+        AppendLog(std::wstring(L"DLSS 5 <> VR Universal Installer v") + CURRENT_VERSION_STR + L" ready.");
         AppendLog(L"Drag & drop a game executable here or click Browse.");
 
         if (PathFileExistsW(L"D:\\Games\\AFOP\\afop.exe")) {
@@ -762,6 +869,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         else if (wmId == IDC_BTN_REFRESH) {
             InspectTarget();
             AppendLog(L"[REFRESH] Diagnostics updated.");
+        }
+        else if (wmId == IDC_BTN_UPDATE) {
+            DoCheckUpdate();
         }
         break;
     }
