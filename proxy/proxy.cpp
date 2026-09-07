@@ -166,16 +166,10 @@ static void InstallXInputHooks()
         }
     }
 
-    // 1. Hook RealVR64.dll's XInputGetState if present
-    if (g_hRealVR && !g_origRealVR_GetState) {
-        void* pTarget = (void*)GetProcAddress(g_hRealVR, "XInputGetState");
-        if (pTarget) {
-            if (MH_CreateHook(pTarget, (LPVOID)&Hooked_RealVR_GetState, (LPVOID*)&g_origRealVR_GetState) == MH_OK) {
-                MH_EnableHook(pTarget);
-                LogMsg("[Proxy-Input] Hooked RealVR64.dll!XInputGetState (D-Pad filter armed)");
-            }
-        }
-    }
+    // NOTE: Do NOT hook RealVR64.dll!XInputGetState — RealVR64 re-exports it as its own
+    // VR input remapping trampoline and needs the original function pointer intact for its
+    // internal hook chain resolution. Hooking it causes "Unable to resolve hook" crash.
+    // The system XInput DLL hooks below are sufficient for D-Pad masking.
 
     // 2. Hook XINPUT1_4.dll (local game directory or system)
     HMODULE hX14 = GetModuleHandleA("XINPUT1_4.dll");
@@ -300,11 +294,12 @@ static void InitProxy()
     // 5. Lancer le thread d'écoute autonome pour F6 et Select+L3
     CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InputWatcherThread, NULL, 0, &g_inputWatcherThreadId);
 
-    // 6. Fixer la priorité haute pour garantir la stabilité de l'ordonnancement en VR
-    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    // NOTE: Do NOT call SetPriorityClass/SetThreadPriority here — this runs during
+    // DllMain (loader lock) and alters thread scheduling during the D3D12/OpenXR
+    // initialization sequence, causing XR_ERROR_CALL_ORDER_INVALID in RealVR64.
+    // The benefit is marginal for a GPU-bound VR workload anyway.
 
-    LogMsg("[Proxy] Proxy ready (Autonomous Input Thread armed, High Priority set).");
+    LogMsg("[Proxy] Proxy ready (Autonomous Input Thread armed).");
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
@@ -487,43 +482,46 @@ static void InitVariablesFromAddonOrIni()
 {
     if (g_varsInitialized) return;
 
+    InitPaths();
+
+    // 1. Read deterministic initial values directly from ReShade.ini
+    int uplift = GetPrivateProfileIntA("RenoDX.DLSS5", "NeuralUplift", 1, g_iniPath);
+    g_masterEnable = (uplift != 0);
+
+    char intStr[32] = {0};
+    GetPrivateProfileStringA("RenoDX.DLSS5", "NRIntensity", "2.00", intStr, sizeof(intStr), g_iniPath);
+    g_nrIntensity = (float)atof(intStr);
+    if (g_nrIntensity <= 0.01f || g_nrIntensity > 10.0f) g_nrIntensity = 2.00f;
+
+    char toneStr[32] = {0};
+    GetPrivateProfileStringA("RenoDX.DLSS5", "NRGlobalTone", "1.00", toneStr, sizeof(toneStr), g_iniPath);
+    g_nrGlobalTone = (float)atof(toneStr);
+    if (g_nrGlobalTone <= 0.01f || g_nrGlobalTone > 5.0f) g_nrGlobalTone = 1.00f;
+
+    g_nrPreset = GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 2, g_iniPath);
+    if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 2;
+
+    g_hudScale = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDScale", 1, g_iniPath);
+    if (g_hudScale < 0 || g_hudScale > 2) g_hudScale = 1;
+
+    g_hudPosIndex = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDPosition", 0, g_iniPath);
+    if (g_hudPosIndex < 0 || g_hudPosIndex > 3) g_hudPosIndex = 0;
+
+    // 2. Locate renodx-dlss5.addon64 if loaded and push values into RAM
     if (!g_renodxBase)
     {
         g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
     }
 
-    InitPaths();
-
     if (g_renodxBase)
     {
-        g_nrIntensity = *(float*)(g_renodxBase + 0x19364C);
-        g_nrGlobalTone = *(float*)(g_renodxBase + 0x193650);
-        g_nrPreset = *(int32_t*)(g_renodxBase + 0x196B98);
-
-        if (g_nrIntensity <= 0.01f) {
-            g_masterEnable = false;
-            g_nrIntensity = 2.00f;
-        } else {
-            g_masterEnable = true;
-            if (g_nrIntensity > 10.0f) g_nrIntensity = 2.50f;
-        }
-        if (g_nrGlobalTone <= 0.0f || g_nrGlobalTone > 5.0f) g_nrGlobalTone = 1.00f;
-
-        // Load Preset from INI (default: 2 - Performance preset)
-        g_nrPreset = GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 2, g_iniPath);
-        if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 2;
-
-        // Apply Performance preset to addon RAM immediately
+        // Push initial state to addon RAM
+        *(uint8_t*)(g_renodxBase + 0x192F68) = g_masterEnable ? 1 : 0;
+        *(float*)(g_renodxBase + 0x19364C) = g_masterEnable ? g_nrIntensity : 0.0f;
+        *(float*)(g_renodxBase + 0x193650) = g_nrGlobalTone;
         *(int32_t*)(g_renodxBase + 0x196B98) = g_nrPreset;
-        // Keep NRStyle neutral (0) to prevent mixing filmic tone mapping with AI preset
-        *(int32_t*)(g_renodxBase + 0x196C2C) = 0;
-
-        // Load scale & position from INI (default: 1.5x for Quest 3 comfort)
-        g_hudScale = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDScale", 1, g_iniPath);
-        if (g_hudScale < 0 || g_hudScale > 2) g_hudScale = 1;
-
-        g_hudPosIndex = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDPosition", 0, g_iniPath);
-        if (g_hudPosIndex < 0 || g_hudPosIndex > 3) g_hudPosIndex = 0;
+        *(int32_t*)(g_renodxBase + 0x196C2C) = 0; // Neutral style
+        *(uint8_t*)(g_renodxBase + 0x1935E8) = 1; // trigger RenoDX parameter sync
 
         g_varsInitialized = true;
         char buf[256];
@@ -539,12 +537,12 @@ static void CommitSettingsToDisk()
     // High-performance single-pass section serialization (replaces 6 separate file opens/parses)
     char secBuf[512];
     int offset = 0;
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "EnableHooks=2") + 1; // NGX direct hooks only (skip Streamline interposer)
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRUICorrection=0") + 1; // Skip redundant UI mask pass in VR
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRIntensity=%.2f", g_masterEnable ? g_nrIntensity : 0.0f) + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NeuralUplift=%d", g_masterEnable ? 1 : 0) + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "EnableHooks=1") + 1; // Standard hooks
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRIntensity=%.2f", g_nrIntensity) + 1; // Preserve chosen intensity!
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRGlobalTone=%.2f", g_nrGlobalTone) + 1;
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRPreset=%d", g_nrPreset) + 1;
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRStyle=0") + 1;
+    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRStyle=0") + 1; // Neutral style
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDScale=%d", g_hudScale) + 1;
     offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDPosition=%d", g_hudPosIndex) + 1;
     secBuf[offset] = '\0'; // Double null terminator for WritePrivateProfileSectionA
@@ -554,7 +552,7 @@ static void CommitSettingsToDisk()
     char logBuf[256];
     sprintf_s(logBuf, sizeof(logBuf), 
         "[VR-DLSS5-HUD] 500ms Debounce Save committed (single-pass): Enable=%d, Int=%.2f, Tone=%.2f, Preset=%d, Scale=%d -> %s",
-        g_masterEnable ? 1 : 0, g_masterEnable ? g_nrIntensity : 0.0f, g_nrGlobalTone, g_nrPreset, g_hudScale, g_iniPath);
+        g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_iniPath);
     LogMsg(logBuf);
 }
 
