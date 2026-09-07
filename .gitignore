@@ -1,0 +1,35 @@
+﻿# Binaires compilés et bibliothèques intermédiaires
+*.obj
+*.exp
+*.lib
+*.pdb
+*.idb
+*.exe~
+*.dll.tmp
+
+# Fichiers temporaires & logs
+*.log
+*.tmp
+*.bak
+__pycache__/
+*.pyc
+
+# Archives générées locales
+dist/
+*.zip
+*.7z
+*.rar
+*.tar.gz
+
+# Cache local de téléchargement
+cache/
+temp/
+tmp/
+.vr-dlss5-patch.manifest
+
+# Fichiers système & IDE
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
