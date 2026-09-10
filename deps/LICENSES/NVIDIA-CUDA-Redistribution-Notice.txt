@@ -1,0 +1,12 @@
+NVIDIA CUDA Runtime - cudart64_12.dll
+
+This distribution includes the NVIDIA CUDA runtime library cudart64_12.dll,
+redistributed unmodified in binary form as permitted for "Redistributable"
+files listed in Attachment A of the NVIDIA CUDA Toolkit End User License
+Agreement (EULA):
+
+    https://docs.nvidia.com/cuda/eula/index.html
+
+The CUDA runtime is required at load time by the DLSS 5 Neural Rendering
+runtime (nvngx_dlssnr.dll), which is NOT included in this distribution and
+must be obtained by the user from official NVIDIA channels.

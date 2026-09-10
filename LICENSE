@@ -24,8 +24,21 @@ SOFTWARE.
 
 ### Third-Party Components & Notices
 
-- **OpenVR SDK**: Copyright (c) Valve Corporation. Licensed under BSD 3-Clause License.
-- **ReShade**: Copyright (c) Patrick Mours. Licensed under BSD 3-Clause License.
-- **RenoDX**: Copyright (c) RankFTW / RenoDX Contributors.
-- **NVIDIA DLSS / NGX / CUDA**: Copyright (c) NVIDIA Corporation. All rights reserved.
+This distribution bundles third-party binaries; their full license texts are
+in `deps/LICENSES/`. The MIT license above applies to this project's own
+code (proxy, installer, tooling). Key third-party components:
+
+- **OptiScaler / DLSS-NR Pre-SR fork**: Copyright (c) OptiScaler contributors
+  and fork authors. Licensed under **GNU GPL-3.0-or-later**
+  (`deps/LICENSES/GPL-3.0-or-later.txt`). Corresponding source: the upstream
+  repository at commit `1b1dd650` plus the patch in `deps/optiscaler-src/`.
+- **MinHook**: Copyright (c) 2009-2017 Tsuda Kageyu. BSD 2-Clause.
+- **OpenVR SDK / `openvr_api.dll`**: Copyright (c) Valve Corporation. BSD 3-Clause.
+- **Intel XeSS runtime**: Copyright (c) Intel Corporation. See `deps/LICENSES/XeSS_LICENSE.txt`.
+- **AMD FidelityFX**: Copyright (c) Advanced Micro Devices, Inc. MIT License.
+- **Microsoft DirectX 12 Agility SDK**: Copyright (c) Microsoft Corporation. MIT License.
+- **NVIDIA CUDA runtime (`cudart64_12.dll`)**: Copyright (c) NVIDIA Corporation. Redistributed in binary form under the CUDA Toolkit EULA (Attachment A); see `deps/LICENSES/NVIDIA-CUDA-Redistribution-Notice.txt`.
+- **RenoDX**: colour processing in OptiScaler is derived from RenoDX by clshortfuse; see `deps/LICENSES/RenoDX_ATTRIBUTION.txt`.
+- **FreeType**: Used by OptiScaler; licensed under the FTL.
+- **NVIDIA DLSS / NGX runtime (`nvngx_dlssnr.dll`)**: Copyright (c) NVIDIA Corporation. NOT included or redistributed; users must source it from official NVIDIA channels.
 - **LukeRoss R.E.A.L. VR Mod**: Copyright (c) LukeRoss. This project is an independent enabler/proxy and does NOT include or redistribute any proprietary LukeRoss binaries or code. Users must obtain their own copy of the mod directly from LukeRoss's official distribution channels.

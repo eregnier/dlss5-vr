@@ -46,6 +46,8 @@ copy /y "deps\nvngx.dll_dlssnr.dll" "%DIST_DIR%\deps\" >nul
 copy /y "deps\OptiScaler.ini" "%DIST_DIR%\deps\" >nul
 copy /y "deps\cudart64_12.dll" "%DIST_DIR%\deps\" >nul
 if exist "deps\OptiScaler" xcopy /e /i /y "deps\OptiScaler" "%DIST_DIR%\deps\OptiScaler\" >nul
+if exist "deps\LICENSES" xcopy /e /i /y "deps\LICENSES" "%DIST_DIR%\deps\LICENSES\" >nul
+if exist "deps\optiscaler-src" xcopy /e /i /y "deps\optiscaler-src" "%DIST_DIR%\deps\optiscaler-src\" >nul
 copy /y "LICENSE" "%DIST_DIR%\" >nul
 copy /y "README.md" "%DIST_DIR%\" >nul
 
