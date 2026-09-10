@@ -33,6 +33,9 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 > - **remember the path** in `%LOCALAPPDATA%\DLSS5-VR\installer.ini` and reuse it for every later install/update;
 > - detect a moved/deleted file, clear the stale path and ask you to pick it again - it never silently skips the model.
 
+> [!NOTE]
+> The patched `OptiScaler.dll` and the VR-tuned `OptiScaler.ini` are bundled. The OptiScaler backends (XeSS/FidelityFX/DirectX runtimes) and the `nvngx.dll_dlssnr.dll` signature forwarder are not redistributed by this project: on a target missing them, the installer downloads the upstream **OptiScaler-DLSSNR v0.7.6** package from the wilsjo2 GitHub release once (internet connection required for this step).
+
 ### 2. Launch the game and open the VR HUD
 
 ![DLSS 5 <> VR HUD](assets/hud.png)
