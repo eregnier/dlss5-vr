@@ -78,11 +78,284 @@ static DWORD g_inputWatcherThreadId = 0;
 static DWORD WINAPI InputWatcherThread(LPVOID lpParam);
 
 // ----------------------------------------------------------------------------
+// VR-DLSS5 live control channel (mirror of OptiScaler/DLSSNR fork's Config.h).
+// OptiScaler only reads OptiScaler.ini at startup, so the HUD publishes desired
+// values here and OptiScaler's worker applies them to Config in real time.
+// ----------------------------------------------------------------------------
+#define VRDLSS5_CTL_MAGIC 0x354C4456u // 'VDL5'
+#define VRDLSS5_CTL_VERSION 2u
+#define VRDLSS5_CTL_MAPPING_NAME "Local\\VRDLSS5_Control_1"
+
+#pragma pack(push, 4)
+struct VrDlss5ControlBlock
+{
+    unsigned int magic;
+    unsigned int version;
+    volatile LONG seq;
+    volatile LONG ackSeq;
+    volatile LONG optiReady;
+    volatile LONG enabled;
+    float workingScale;
+    volatile LONG runBeforeSR;
+    volatile LONG residualAcrossRR;
+    volatile LONG preset;
+    float intensity;
+    volatile LONG style;
+    volatile LONG featureRunning;
+    float gpuFrameMs;
+    volatile LONG reserved[15];
+};
+#pragma pack(pop)
+
+static HANDLE g_vrCtlMap = NULL;
+static VrDlss5ControlBlock* g_vrCtl = NULL;
+
+static bool VrCtlEnsure()
+{
+    if (g_vrCtl) return true;
+    if (!g_vrCtlMap)
+    {
+        // Per-process name: two games using the tool at once must not cross-talk.
+        char mappingName[96];
+        sprintf_s(mappingName, sizeof(mappingName), "%s_%lu", VRDLSS5_CTL_MAPPING_NAME,
+                  GetCurrentProcessId());
+        g_vrCtlMap = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+                                        sizeof(VrDlss5ControlBlock), mappingName);
+    }
+    if (!g_vrCtlMap) return false;
+
+    g_vrCtl = (VrDlss5ControlBlock*)MapViewOfFile(g_vrCtlMap, FILE_MAP_ALL_ACCESS, 0, 0,
+                                                  sizeof(VrDlss5ControlBlock));
+    if (!g_vrCtl) return false;
+
+    if (g_vrCtl->magic != VRDLSS5_CTL_MAGIC || g_vrCtl->version != VRDLSS5_CTL_VERSION)
+    {
+        memset(g_vrCtl, 0, sizeof(VrDlss5ControlBlock));
+        g_vrCtl->magic = VRDLSS5_CTL_MAGIC;
+        g_vrCtl->version = VRDLSS5_CTL_VERSION;
+    }
+    return true;
+}
+
+// Auxiliary child processes (error/crash reporters) also load this dxgi.dll from
+// the game folder. They must not create an OpenVR overlay, hook XInput or poll
+// the HUD: that is what produced the CreateOverlay(17)/SetOverlayRaw(12) storm.
+static bool IsAuxiliaryProcess()
+{
+    char exePath[MAX_PATH] = {0};
+    if (!GetModuleFileNameA(NULL, exePath, MAX_PATH))
+        return false;
+
+    const char* base = strrchr(exePath, '\\');
+    base = base ? base + 1 : exePath;
+
+    return _strnicmp(base, "REDEngineErrorReporter", 22) == 0 ||
+           _strnicmp(base, "CrashReporter", 13) == 0 ||
+           _strnicmp(base, "REDprelauncher", 14) == 0 ||
+           _strnicmp(base, "ErrorReporter", 13) == 0;
+}
+
+
+// ----------------------------------------------------------------------------
 // XInput & Gamepad Interception: D-Pad Masking during HUD Navigation
 // Blocks D-pad forwarding to game engine while preserving movement & camera sticks
 // ----------------------------------------------------------------------------
 typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD dwUserIndex, XINPUT_STATE* pState);
 typedef MMRESULT (WINAPI *PFN_joyGetPosEx)(UINT uJoyID, LPJOYINFOEX pji);
+
+// Some games (Cyberpunk with a DualSense/8BitDo-class pad) read gamepad input
+// through the HID parser instead of XInput. Masking XInput is then useless, so
+// the D-pad is neutralised at the HID layer: HidP_GetValueCaps is inspected for
+// the hat switch usage (Generic Desktop page 0x01, usage 0x39) and HidP_GetData
+// results have that entry forced to its centred (null) value while HUD is open.
+#define HIDP_STATUS_SUCCESS 0x00110000L
+#define HIDP_INPUT_REPORT 0
+#define MAX_HID_HATS 8
+
+#pragma pack(push, 8)
+struct HIDP_DATA_MIN
+{
+    unsigned short DataIndex;
+    unsigned short Reserved; // bit 0 set = button, clear = value
+    union { unsigned long RawValue; unsigned char On; };
+};
+
+struct HIDP_VALUE_CAPS_MIN
+{
+    unsigned short UsagePage;
+    unsigned char ReportID;
+    unsigned char IsAlias;
+    unsigned short BitField;
+    unsigned short LinkCollection;
+    unsigned short LinkUsage;
+    unsigned short LinkUsagePage;
+    unsigned char IsRange;
+    unsigned char IsStringRange;
+    unsigned char IsDesignatorRange;
+    unsigned char IsAbsolute;
+    unsigned char HasNull;
+    unsigned char Reserved;
+    unsigned short BitSize;
+    unsigned short ReportCount;
+    unsigned short Reserved2[5];
+    unsigned long UnitsExp;
+    unsigned long Units;
+    long LogicalMin;
+    long LogicalMax;
+    long PhysicalMin;
+    long PhysicalMax;
+    union
+    {
+        struct { unsigned short UsageMin, UsageMax, StringMin, StringMax, DesignatorMin, DesignatorMax, DataIndexMin, DataIndexMax; } Range;
+        struct { unsigned short Usage, Reserved1, StringIndex, Reserved2, DesignatorIndex, Reserved3, DataIndex, Reserved4; } NotRange;
+    };
+};
+#pragma pack(pop)
+
+struct HidHatCap
+{
+    void* preparsedData;
+    int reportType;
+    unsigned long indexMin;
+    unsigned long indexMax;
+    long centered;
+};
+
+static HidHatCap g_hidHats[MAX_HID_HATS];
+static volatile LONG g_hidHatCount = 0;
+static volatile LONG g_hidHatsNeutralized = 0;
+
+typedef LONG (WINAPI *PFN_HidP_GetData)(int, HIDP_DATA_MIN*, void*, unsigned long);
+typedef LONG (WINAPI *PFN_HidP_GetUsageValue)(int, unsigned short, unsigned short, unsigned short,
+                                              unsigned long*, void*, char*, unsigned long);
+typedef LONG (WINAPI *PFN_HidP_GetValueCaps)(int, HIDP_VALUE_CAPS_MIN*, unsigned short*, void*);
+typedef int (WINAPI *PFN_SteamInputDigitalAction)(void*, unsigned long long, void*, unsigned int);
+
+static PFN_HidP_GetData g_origHidP_GetData = NULL;
+static PFN_HidP_GetUsageValue g_origHidP_GetUsageValue = NULL;
+static PFN_HidP_GetValueCaps g_origHidP_GetValueCaps = NULL;
+static PFN_SteamInputDigitalAction g_origSteamDigitalAction = NULL;
+
+// Alternative input paths (HID gamepads, Steam Input) probed for diagnosis.
+static volatile LONG g_hidGetData = 0;
+static volatile LONG g_hidGetUsageValue = 0;
+static volatile LONG g_hidGetValueCaps = 0;
+static volatile LONG g_steamDigitalAction = 0;
+static volatile LONG g_hidDiagLogsLeft = 8;
+
+static LONG WINAPI Hooked_HidP_GetValueCaps(int reportType, HIDP_VALUE_CAPS_MIN* caps,
+                                            unsigned short* length, void* preparsedData)
+{
+    InterlockedIncrement(&g_hidGetValueCaps);
+
+    LONG result = g_origHidP_GetValueCaps
+                      ? g_origHidP_GetValueCaps(reportType, caps, length, preparsedData)
+                      : 0;
+
+    if (result == HIDP_STATUS_SUCCESS && caps && length && reportType == HIDP_INPUT_REPORT)
+    {
+        for (unsigned short i = 0; i < *length && i < 512; i++)
+        {
+            HIDP_VALUE_CAPS_MIN& c = caps[i];
+            if (c.UsagePage != 0x01) continue; // Generic Desktop
+
+            const bool isHat = c.IsRange ? (c.Range.UsageMin <= 0x39 && 0x39 <= c.Range.UsageMax)
+                                         : (c.NotRange.Usage == 0x39);
+            if (!isHat) continue;
+
+            LONG idx = InterlockedIncrement(&g_hidHatCount) - 1;
+            if (idx >= MAX_HID_HATS) continue;
+
+            g_hidHats[idx].preparsedData = preparsedData;
+            g_hidHats[idx].reportType = reportType;
+            g_hidHats[idx].indexMin = c.IsRange ? c.Range.DataIndexMin : c.NotRange.DataIndex;
+            g_hidHats[idx].indexMax = c.IsRange ? c.Range.DataIndexMax : c.NotRange.DataIndex;
+            g_hidHats[idx].centered = c.HasNull ? (c.LogicalMax + 1) : c.LogicalMax;
+
+            char b[192];
+            sprintf_s(b, sizeof(b),
+                "[Proxy-Input] HID hat switch found: idx %lu..%lu centred=%ld (logical %ld..%ld null=%d)",
+                g_hidHats[idx].indexMin, g_hidHats[idx].indexMax, g_hidHats[idx].centered,
+                c.LogicalMin, c.LogicalMax, c.HasNull ? 1 : 0);
+            LogMsg(b);
+        }
+    }
+
+    return result;
+}
+
+static LONG WINAPI Hooked_HidP_GetData(int reportType, HIDP_DATA_MIN* dataList, void* preparsedData,
+                                       unsigned long dataLength)
+{
+    InterlockedIncrement(&g_hidGetData);
+
+    LONG count = g_origHidP_GetData
+                     ? g_origHidP_GetData(reportType, dataList, preparsedData, dataLength)
+                     : 0;
+
+    if (count > 0 && dataList && reportType == HIDP_INPUT_REPORT)
+    {
+        // Diagnostic: dump the parsed value entries a few times so the log shows
+        // which DataIndex moves when the D-pad is pressed.
+        if (g_hudVisible && InterlockedDecrement(&g_hidDiagLogsLeft) >= 0)
+        {
+            char b[512];
+            int o = sprintf_s(b, sizeof(b), "[Proxy-Input] HID data (hud open):");
+            for (LONG i = 0; i < count && i < 24; i++)
+            {
+                int w;
+                if (dataList[i].Reserved & 1)
+                    w = sprintf_s(b + o, sizeof(b) - o, " [b%u=%u]",
+                                  dataList[i].DataIndex, dataList[i].On);
+                else
+                    w = sprintf_s(b + o, sizeof(b) - o, " [di=%u v=%lu]",
+                                  dataList[i].DataIndex, dataList[i].RawValue);
+                if (w > 0 && o + w < (int)sizeof(b)) o += w;
+            }
+            LogMsg(b);
+        }
+
+        if (g_hudVisible)
+        {
+            for (LONG i = 0; i < count; i++)
+            {
+                if (dataList[i].Reserved & 1) continue; // only values (hat is a value)
+                for (int h = 0; h < g_hidHatCount && h < MAX_HID_HATS; h++)
+                {
+                    if (g_hidHats[h].reportType != reportType) continue;
+                    if (g_hidHats[h].preparsedData && g_hidHats[h].preparsedData != preparsedData) continue;
+                    if (dataList[i].DataIndex < g_hidHats[h].indexMin ||
+                        dataList[i].DataIndex > g_hidHats[h].indexMax) continue;
+
+                    if (dataList[i].RawValue != (unsigned long)g_hidHats[h].centered)
+                    {
+                        dataList[i].RawValue = (unsigned long)g_hidHats[h].centered;
+                        InterlockedIncrement(&g_hidHatsNeutralized);
+                    }
+                }
+            }
+        }
+    }
+
+    return count;
+}
+
+static LONG WINAPI Hooked_HidP_GetUsageValue(int t, unsigned short up, unsigned short lc,
+                                             unsigned short u, unsigned long* v, void* p,
+                                             char* r, unsigned long rl)
+{
+    InterlockedIncrement(&g_hidGetUsageValue);
+    return g_origHidP_GetUsageValue ? g_origHidP_GetUsageValue(t, up, lc, u, v, p, r, rl) : 0;
+}
+
+static int WINAPI Hooked_SteamDigitalAction(void* self, unsigned long long handle, void* data,
+                                            unsigned int size)
+{
+    InterlockedIncrement(&g_steamDigitalAction);
+    return g_origSteamDigitalAction ? g_origSteamDigitalAction(self, handle, data, size) : 0;
+}
+
+static void InstallDiagnosticInputHooks();
 
 static PFN_XInputGetState g_origXInput1_4_GetState = NULL;
 static PFN_XInputGetState g_origXInput1_4_Ex = NULL;
@@ -91,6 +364,162 @@ static PFN_XInputGetState g_origXInput9_1_0_GetState = NULL;
 static PFN_XInputGetState g_origRealVR_GetState = NULL;
 static PFN_joyGetPosEx g_origJoyGetPosEx = NULL;
 
+// RealVR64 redirects XInput calls through its own RWX thunks:
+//   XINPUT*_!XInputGetState entry = E9 -> thunk "FF 25 <ptr>" -> RealVR64 code.
+// The game actually polls XINPUT1_4's thunk, not XINPUT9_1_0's, so every slot
+// that points into RealVR64 must be repointed to a detour. We never touch
+// RealVR64's own code (its hook engine validates it and crashes otherwise).
+#define MAX_REALVR_STUB_PATCHES 8
+struct RealVRStubPatch
+{
+    void** slot;
+    void* original;
+    char label[32];
+    volatile LONG calls;
+};
+static RealVRStubPatch g_realVrPatches[MAX_REALVR_STUB_PATCHES];
+static volatile LONG g_realVrPatchCount = 0;
+static volatile LONG g_dpadMaskedSamples = 0;
+static volatile LONG g_realVrHookCalls = 0;
+
+// Per-path instrumentation: which XInput entry the game actually polls.
+static volatile LONG g_hookCalls9 = 0;
+static volatile LONG g_hookCalls14 = 0;
+static volatile LONG g_hookCalls14ex = 0;
+static volatile LONG g_hookCalls13 = 0;
+static volatile LONG g_hookCallsJoy = 0;
+static volatile LONG g_dpadSeenAny = 0;   // D-pad bits seen regardless of HUD state
+static volatile LONG g_povSeenAny = 0;    // non-centered POV hat seen
+
+
+
+static bool IsAddressInRealVR(void* p)
+{
+    if (!g_hRealVR || !p) return false;
+    HMODULE hOwner = NULL;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)p, &hOwner))
+        return false;
+    return hOwner == g_hRealVR;
+}
+
+// Names the module that currently owns the first hop of a hooked function, so
+// the log shows who is really intercepting XInput (us, OptiScaler, RealVR64...).
+static void GetChainHopOwnerName(void* pFn, char* outName, size_t outLen)
+{
+    if (!outName || outLen == 0) return;
+    outName[0] = '\0';
+    if (!pFn) { strcpy_s(outName, outLen, "null"); return; }
+
+    unsigned char* cur = (unsigned char*)pFn;
+    unsigned char b[16];
+    memcpy(b, cur, sizeof(b));
+
+    void* next = NULL;
+    if (b[0] == 0xE9) {
+        int rel = 0; memcpy(&rel, b + 1, 4);
+        next = cur + 5 + rel;
+    } else if (b[0] == 0xFF && b[1] == 0x25) {
+        int disp = 0; memcpy(&disp, b + 2, 4);
+        void** slot = (void**)(cur + 6 + disp);
+        next = *slot;
+    }
+
+    if (!next) { strcpy_s(outName, outLen, "direct"); return; }
+
+    HMODULE hOwner = NULL;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)next, &hOwner) && hOwner)
+    {
+        char path[MAX_PATH] = {0};
+        GetModuleFileNameA(hOwner, path, MAX_PATH);
+        char* base = strrchr(path, '\\');
+        strcpy_s(outName, outLen, base ? base + 1 : path);
+    }
+    else
+    {
+        sprintf_s(outName, outLen, "?@%p", next);
+    }
+}
+
+// Locate the game executable's IAT slot for an imported function, so the log can
+// show whether RealVR64 (or anyone else) rewrote the call site directly.
+static void* FindGameIatSlot(const char* dllSubstr, const char* procName)
+{
+    HMODULE exe = GetModuleHandleA(NULL);
+    if (!exe) return NULL;
+    unsigned char* base = (unsigned char*)exe;
+
+    auto dos = (IMAGE_DOS_HEADER*)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+    auto nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
+
+    DWORD impRva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!impRva) return NULL;
+
+    auto imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + impRva);
+    for (; imp->Name; imp++)
+    {
+        const char* mod = (const char*)(base + imp->Name);
+        if (!strstr(mod, dllSubstr)) continue;
+
+        auto thunk = (IMAGE_THUNK_DATA*)(base + imp->OriginalFirstThunk);
+        auto iat = (IMAGE_THUNK_DATA*)(base + imp->FirstThunk);
+        for (; thunk && thunk->u1.AddressOfData; thunk++, iat++)
+        {
+            const char* name = NULL;
+            if (!(thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG))
+                name = ((IMAGE_IMPORT_BY_NAME*)(base + thunk->u1.AddressOfData))->Name;
+
+            if (name && _stricmp(name, procName) == 0)
+                return &iat->u1.Function;
+
+            // Ordinal 100 is XInputGetStateEx, the variant that also reports the
+            // Guide button. It is imported by ordinal, not by name.
+            if (!name && _stricmp(procName, "XInputGetStateEx") == 0 &&
+                (thunk->u1.Ordinal & 0xffff) == 100)
+                return &iat->u1.Function;
+        }
+    }
+    return NULL;
+}
+
+// A second OptiScaler build left under a proxy name (typically WINMM.dll from an
+// older install) would run the neural pass itself and ignore our control channel.
+// Log any such local DLL so the conflict is visible in the proxy log.
+static void LogRogueEngineProxies()
+{
+    static bool s_done = false;
+    if (s_done) return;
+    s_done = true;
+
+    char exePath[MAX_PATH] = {0};
+    if (!GetModuleFileNameA(NULL, exePath, MAX_PATH)) return;
+    char* lastSlash = strrchr(exePath, '\\');
+    if (!lastSlash) return;
+    *(lastSlash + 1) = '\0';
+
+    const char* names[] = { "WINMM.dll", "winmm.dll", "version.dll", "wininet.dll",
+                            "winhttp.dll", "dinput8.dll", "d3d12.dll" };
+    for (const char* name : names)
+    {
+        HMODULE h = GetModuleHandleA(name);
+        if (!h) continue;
+
+        char path[MAX_PATH] = {0};
+        if (!GetModuleFileNameA(h, path, MAX_PATH)) continue;
+        if (_strnicmp(path, exePath, strlen(exePath)) != 0) continue;
+
+        char buf[384];
+        sprintf_s(buf, sizeof(buf),
+            "[Proxy-Diag] WARNING: competing engine/proxy loaded from the game folder: %s", path);
+        LogMsg(buf);
+    }
+}
+
 static inline DWORD FilterXInputState(DWORD dwUserIndex, XINPUT_STATE* pState, DWORD result)
 {
     // If called from our own InputWatcherThread, NEVER mask so that HUD can be navigated freely
@@ -98,54 +527,103 @@ static inline DWORD FilterXInputState(DWORD dwUserIndex, XINPUT_STATE* pState, D
         return result;
     }
 
+    const WORD dpadBits = XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN |
+                          XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT;
+
+    // Instrumentation: does any game poll even carry D-pad bits?
+    if (result == ERROR_SUCCESS && pState && (pState->Gamepad.wButtons & dpadBits) != 0)
+        InterlockedIncrement(&g_dpadSeenAny);
+
     // When the VR HUD is visible, mask out ONLY the D-pad bits (0x000F)
     // Up (0x0001), Down (0x0002), Left (0x0004), Right (0x0008)
     // Movement sticks, camera stick, face buttons, bumpers, triggers remain 100% active in-game
     if (result == ERROR_SUCCESS && pState && g_hudVisible) {
-        pState->Gamepad.wButtons &= ~(XINPUT_GAMEPAD_DPAD_UP | 
-                                      XINPUT_GAMEPAD_DPAD_DOWN | 
-                                      XINPUT_GAMEPAD_DPAD_LEFT | 
-                                      XINPUT_GAMEPAD_DPAD_RIGHT);
+        if ((pState->Gamepad.wButtons & dpadBits) != 0)
+            InterlockedIncrement(&g_dpadMaskedSamples);
+        pState->Gamepad.wButtons &= ~dpadBits;
     }
     return result;
 }
 
 static DWORD WINAPI Hooked_XInput1_4_GetState(DWORD dwUserIndex, XINPUT_STATE* pState)
 {
+    InterlockedIncrement(&g_hookCalls14);
     DWORD res = g_origXInput1_4_GetState ? g_origXInput1_4_GetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
     return FilterXInputState(dwUserIndex, pState, res);
 }
 
 static DWORD WINAPI Hooked_XInput1_4_Ex(DWORD dwUserIndex, XINPUT_STATE* pState)
 {
+    InterlockedIncrement(&g_hookCalls14ex);
     DWORD res = g_origXInput1_4_Ex ? g_origXInput1_4_Ex(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
     return FilterXInputState(dwUserIndex, pState, res);
 }
 
 static DWORD WINAPI Hooked_XInput1_3_GetState(DWORD dwUserIndex, XINPUT_STATE* pState)
 {
+    InterlockedIncrement(&g_hookCalls13);
     DWORD res = g_origXInput1_3_GetState ? g_origXInput1_3_GetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
     return FilterXInputState(dwUserIndex, pState, res);
 }
 
 static DWORD WINAPI Hooked_XInput9_1_0_GetState(DWORD dwUserIndex, XINPUT_STATE* pState)
 {
+    InterlockedIncrement(&g_hookCalls9);
     DWORD res = g_origXInput9_1_0_GetState ? g_origXInput9_1_0_GetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
     return FilterXInputState(dwUserIndex, pState, res);
 }
 
-static DWORD WINAPI Hooked_RealVR_GetState(DWORD dwUserIndex, XINPUT_STATE* pState)
+static __declspec(thread) int t_realVrStubDepth = 0;
+
+static DWORD FilterRealVRStub(int index, DWORD dwUserIndex, XINPUT_STATE* pState)
 {
-    DWORD res = g_origRealVR_GetState ? g_origRealVR_GetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
+    InterlockedIncrement(&g_realVrHookCalls);
+    if (index >= 0 && index < MAX_REALVR_STUB_PATCHES)
+        InterlockedIncrement(&g_realVrPatches[index].calls);
+
+    void* original = (index < g_realVrPatchCount) ? g_realVrPatches[index].original : NULL;
+
+    // Guard against a nested callback through the same thunk (would recurse
+    // forever): nested calls pass through unfiltered, the outer call filters.
+    if (t_realVrStubDepth > 0)
+    {
+        return original ? ((PFN_XInputGetState)original)(dwUserIndex, pState)
+                        : ERROR_DEVICE_NOT_CONNECTED;
+    }
+
+    t_realVrStubDepth++;
+    DWORD res = original ? ((PFN_XInputGetState)original)(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
+    t_realVrStubDepth--;
+
     return FilterXInputState(dwUserIndex, pState, res);
 }
 
+static DWORD WINAPI Hooked_RealVRStub0(DWORD dwUserIndex, XINPUT_STATE* pState) { return FilterRealVRStub(0, dwUserIndex, pState); }
+static DWORD WINAPI Hooked_RealVRStub1(DWORD dwUserIndex, XINPUT_STATE* pState) { return FilterRealVRStub(1, dwUserIndex, pState); }
+static DWORD WINAPI Hooked_RealVRStub2(DWORD dwUserIndex, XINPUT_STATE* pState) { return FilterRealVRStub(2, dwUserIndex, pState); }
+static DWORD WINAPI Hooked_RealVRStub3(DWORD dwUserIndex, XINPUT_STATE* pState) { return FilterRealVRStub(3, dwUserIndex, pState); }
+static DWORD WINAPI Hooked_RealVRStub4(DWORD dwUserIndex, XINPUT_STATE* pState) { return FilterRealVRStub(4, dwUserIndex, pState); }
+static DWORD WINAPI Hooked_RealVRStub5(DWORD dwUserIndex, XINPUT_STATE* pState) { return FilterRealVRStub(5, dwUserIndex, pState); }
+static DWORD WINAPI Hooked_RealVRStub6(DWORD dwUserIndex, XINPUT_STATE* pState) { return FilterRealVRStub(6, dwUserIndex, pState); }
+static DWORD WINAPI Hooked_RealVRStub7(DWORD dwUserIndex, XINPUT_STATE* pState) { return FilterRealVRStub(7, dwUserIndex, pState); }
+
+static void* const g_realVrDetours[MAX_REALVR_STUB_PATCHES] = {
+    (void*)&Hooked_RealVRStub0, (void*)&Hooked_RealVRStub1,
+    (void*)&Hooked_RealVRStub2, (void*)&Hooked_RealVRStub3,
+    (void*)&Hooked_RealVRStub4, (void*)&Hooked_RealVRStub5,
+    (void*)&Hooked_RealVRStub6, (void*)&Hooked_RealVRStub7
+};
+
 static MMRESULT WINAPI Hooked_joyGetPosEx(UINT uJoyID, LPJOYINFOEX pji)
 {
+    InterlockedIncrement(&g_hookCallsJoy);
     MMRESULT res = g_origJoyGetPosEx ? g_origJoyGetPosEx(uJoyID, pji) : JOYERR_PARMS;
     if (GetCurrentThreadId() == g_inputWatcherThreadId) return res;
-    if (res == JOYERR_NOERROR && pji && g_hudVisible) {
-        pji->dwPOV = JOY_POVCENTERED; // 0xFFFF = neutral POV hat (D-pad centered)
+    if (res == JOYERR_NOERROR && pji) {
+        if (pji->dwPOV != JOY_POVCENTERED)
+            InterlockedIncrement(&g_povSeenAny);
+        if (g_hudVisible)
+            pji->dwPOV = JOY_POVCENTERED; // 0xFFFF = neutral POV hat (D-pad centered)
     }
     return res;
 }
@@ -230,6 +708,225 @@ static void InstallXInputHooks()
             }
         }
     }
+
+    InstallDiagnosticInputHooks();
+}
+
+// ----------------------------------------------------------------------------
+// Diagnostic hooks for alternative input paths. They only count calls so the
+// proxy log can tell whether the game reads gamepad state through HID or Steam
+// Input instead of XInput (masking D-pad at the XInput layer would then never
+// work).
+// ----------------------------------------------------------------------------
+static void InstallDiagnosticInputHooks()
+{
+    HMODULE hHid = GetModuleHandleA("hid.dll");
+    if (hHid)
+    {
+        if (!g_origHidP_GetData)
+        {
+            void* p = (void*)GetProcAddress(hHid, "HidP_GetData");
+            if (p && MH_CreateHook(p, (LPVOID)&Hooked_HidP_GetData, (LPVOID*)&g_origHidP_GetData) == MH_OK)
+                MH_EnableHook(p);
+        }
+        if (!g_origHidP_GetUsageValue)
+        {
+            void* p = (void*)GetProcAddress(hHid, "HidP_GetUsageValue");
+            if (p && MH_CreateHook(p, (LPVOID)&Hooked_HidP_GetUsageValue, (LPVOID*)&g_origHidP_GetUsageValue) == MH_OK)
+                MH_EnableHook(p);
+        }
+        if (!g_origHidP_GetValueCaps)
+        {
+            void* p = (void*)GetProcAddress(hHid, "HidP_GetValueCaps");
+            if (p && MH_CreateHook(p, (LPVOID)&Hooked_HidP_GetValueCaps, (LPVOID*)&g_origHidP_GetValueCaps) == MH_OK)
+                MH_EnableHook(p);
+        }
+    }
+
+    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+    if (hSteam && !g_origSteamDigitalAction)
+    {
+        void* p = (void*)GetProcAddress(hSteam, "SteamAPI_ISteamInput_GetDigitalActionData");
+        if (p && MH_CreateHook(p, (LPVOID)&Hooked_SteamDigitalAction, (LPVOID*)&g_origSteamDigitalAction) == MH_OK)
+            MH_EnableHook(p);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// RealVR64 XInput thunk patch: LukeRoss rewrites the XInput entry points to
+// "E9 -> FF 25 [slot] -> RealVR64 code". The game polls XINPUT1_4's thunk (not
+// XINPUT9_1_0's), so every slot that points into RealVR64 gets repointed to a
+// dedicated detour that calls the captured original and runs the D-Pad filter.
+// RealVR64's code itself is never modified (its hook engine validates it).
+// ----------------------------------------------------------------------------
+static bool IsSlotAlreadyPatched(void** slot)
+{
+    for (int i = 0; i < g_realVrPatchCount; i++)
+    {
+        if (g_realVrPatches[i].slot == slot)
+            return true;
+    }
+    return false;
+}
+
+// Follow "E9 -> [E9 ...] -> FF 25 [slot]" and return the writable slot.
+static void** FollowToWritableSlot(unsigned char* pFn)
+{
+    if (!pFn) return NULL;
+    unsigned char* cur = pFn;
+    for (int hop = 0; hop < 4; hop++)
+    {
+        if (cur[0] == 0xE9)
+        {
+            int rel = 0;
+            memcpy(&rel, cur + 1, sizeof(rel));
+            cur = cur + 5 + rel;
+        }
+        else if (cur[0] == 0xFF && cur[1] == 0x25)
+        {
+            int disp = 0;
+            memcpy(&disp, cur + 2, sizeof(disp));
+            return (void**)(cur + 6 + disp);
+        }
+        else
+        {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+static bool PatchRealVRSlot(const char* label, void** slot, unsigned int diagBit,
+                            unsigned int* diagMask, int* installed)
+{
+    if (!slot || IsSlotAlreadyPatched(slot)) return false;
+
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(slot, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect == PAGE_NOACCESS || mbi.Protect == PAGE_GUARD) return false;
+
+    if (!IsAddressInRealVR(*slot))
+    {
+        if (!(*diagMask & diagBit))
+        {
+            *diagMask |= diagBit;
+            char ownerName[64] = {0};
+            GetChainHopOwnerName((void*)*slot, ownerName, sizeof(ownerName));
+            char dbg[320];
+            sprintf_s(dbg, sizeof(dbg),
+                "[Proxy-Input] DIAG %s slot target=%p owner=%s (not RealVR64, skipped)",
+                label, *slot, ownerName);
+            LogMsg(dbg);
+        }
+        return false;
+    }
+
+    LONG idx = InterlockedIncrement(&g_realVrPatchCount) - 1;
+    if (idx >= MAX_REALVR_STUB_PATCHES)
+    {
+        InterlockedDecrement(&g_realVrPatchCount);
+        return false;
+    }
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect))
+    {
+        InterlockedDecrement(&g_realVrPatchCount);
+        return false;
+    }
+
+    g_realVrPatches[idx].slot = slot;
+    g_realVrPatches[idx].original = *slot;
+    strcpy_s(g_realVrPatches[idx].label, label);
+    g_realVrPatches[idx].calls = 0;
+    InterlockedExchangePointer((PVOID volatile*)slot, g_realVrDetours[idx]);
+    VirtualProtect(slot, sizeof(void*), oldProtect, &oldProtect);
+
+    char buf[288];
+    sprintf_s(buf, sizeof(buf),
+        "[Proxy-Input] RealVR64 thunk patched: %s (slot=%p original=%p, D-Pad filter LIVE)",
+        label, (void*)slot, g_realVrPatches[idx].original);
+    LogMsg(buf);
+    (*installed)++;
+    return true;
+}
+
+static bool TryPatchRealVRSlot(const char* label, unsigned char* pFn, unsigned int diagBit,
+                               unsigned int* diagMask, int* installed)
+{
+    if (!pFn || pFn[0] != 0xE9) return false;
+    return PatchRealVRSlot(label, FollowToWritableSlot(pFn), diagBit, diagMask, installed);
+}
+
+static bool InstallRealVRXInputStubPatch()
+{
+    if (!g_hRealVR) return false;
+
+    static unsigned int s_diagLoggedMask = 0;
+    int installed = 0;
+
+    const char* modules[] = { "XINPUT1_4.dll", "XINPUT9_1_0.dll", "XINPUT1_3.dll" };
+    for (int mi = 0; mi < 3; mi++)
+    {
+        const char* moduleName = modules[mi];
+        HMODULE hMod = GetModuleHandleA(moduleName);
+        if (!hMod) continue;
+
+        unsigned char* pNamed = (unsigned char*)GetProcAddress(hMod, "XInputGetState");
+        if (pNamed)
+        {
+            char label[32];
+            sprintf_s(label, sizeof(label), "%s!GetState", moduleName);
+            TryPatchRealVRSlot(label, pNamed, 1u << (mi * 2), &s_diagLoggedMask, &installed);
+        }
+
+        // Ordinal 100 = XInputGetStateEx (same signature, adds the Guide button).
+        unsigned char* pEx = (unsigned char*)GetProcAddress(hMod, (LPCSTR)100);
+        if (pEx && pEx != pNamed)
+        {
+            char label[32];
+            sprintf_s(label, sizeof(label), "%s!#100", moduleName);
+            TryPatchRealVRSlot(label, pEx, 1u << (mi * 2 + 1), &s_diagLoggedMask, &installed);
+        }
+    }
+
+    // The game may also have its import slot rewritten directly by RealVR64
+    // (IAT hook instead of entry-point hook). Patch it as well when that is the
+    // case; the captured original is then RealVR64's function.
+    unsigned int iatDiagBits = 0x40u;
+    void** iatNamed = (void**)FindGameIatSlot("XINPUT", "XInputGetState");
+    if (iatNamed)
+        PatchRealVRSlot("GameIAT!GetState", iatNamed, iatDiagBits, &s_diagLoggedMask, &installed);
+
+    void** iatEx = (void**)FindGameIatSlot("XINPUT", "XInputGetStateEx");
+    if (iatEx && iatEx != iatNamed)
+        PatchRealVRSlot("GameIAT!#100", iatEx, iatDiagBits << 1, &s_diagLoggedMask, &installed);
+
+    return installed > 0;
+}
+
+static void MaintainRealVRXInputStubPatch()
+{
+    if (!g_hRealVR) return;
+
+    // Re-apply if RealVR64/OptiScaler rebuilt a thunk under us, then look for
+    // slots we have not seen yet (modules can load late).
+    for (int i = 0; i < g_realVrPatchCount; i++)
+    {
+        RealVRStubPatch& p = g_realVrPatches[i];
+        if (p.slot && *p.slot != g_realVrDetours[i])
+        {
+            DWORD oldProtect = 0;
+            if (VirtualProtect(p.slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect))
+            {
+                InterlockedExchangePointer((PVOID volatile*)p.slot, g_realVrDetours[i]);
+                VirtualProtect(p.slot, sizeof(void*), oldProtect, &oldProtect);
+                LogMsg("[Proxy-Input] RealVR64 XInput thunk re-patched after external overwrite");
+            }
+        }
+    }
+
+    InstallRealVRXInputStubPatch();
 }
 
 static void InitProxy()
@@ -240,13 +937,28 @@ static void InitProxy()
 
     LogMsg("[Proxy] Initializing VR-DLSS5 Dual Proxy (OptiScaler Pre-SR Engine)...");
 
+    static bool s_auxiliary = false;
+    static bool s_vrHost = false;
+
+    if (IsAuxiliaryProcess())
+    {
+        s_auxiliary = true;
+        LogMsg("[Proxy] Auxiliary process detected: VR HUD / OpenVR / input hooks disabled (DXGI forwarding only)");
+    }
+
     // 1. Charger OptiScaler Pre-SR Engine (OptiScaler.asi / OptiScaler.dll / dbghelp.dll)
+    if (!s_auxiliary)
+    {
     g_hOptiScaler = LoadLibraryA("OptiScaler.asi");
     if (!g_hOptiScaler) g_hOptiScaler = LoadLibraryA("OptiScaler.dll");
     if (!g_hOptiScaler) g_hOptiScaler = LoadLibraryA("dbghelp.dll");
     if (g_hOptiScaler)
     {
-        LogMsg("[Proxy] Successfully loaded OptiScaler Pre-SR Engine");
+        char optiPath[MAX_PATH] = {0};
+        GetModuleFileNameA(g_hOptiScaler, optiPath, MAX_PATH);
+        char optiBuf[MAX_PATH + 64];
+        sprintf_s(optiBuf, sizeof(optiBuf), "[Proxy] Successfully loaded OptiScaler Pre-SR Engine: %s", optiPath);
+        LogMsg(optiBuf);
     }
     else
     {
@@ -274,6 +986,11 @@ static void InitProxy()
     {
         LogMsg("[Proxy] WARNING: RealVR64.dll not found, falling back to system dxgi.dll");
     }
+    } // !s_auxiliary
+
+    // VR host = the real game process where LukeRoss is active. Only there do we
+    // own an OpenVR overlay, XInput hooks and the HUD thread.
+    s_vrHost = (!s_auxiliary && g_hRealVR != NULL);
 
     // 3. Repli de secours vers system32 dxgi si une fonction n'est pas dans RealVR
     char sysPath[MAX_PATH];
@@ -290,8 +1007,19 @@ static void InitProxy()
         if (!g_pfnDXGIGetDebugInterface1) g_pfnDXGIGetDebugInterface1 = (PFN_DXGIGetDebugInterface1)GetProcAddress(g_hSysDxgi, "DXGIGetDebugInterface1");
     }
 
+    if (!s_vrHost)
+    {
+        LogMsg("[Proxy] Proxy ready (VR features disabled in this process).");
+        return;
+    }
+
     // 4. Installer les hooks d'interception D-Pad (MinHook)
     InstallXInputHooks();
+
+    // 4b. Neutraliser la redirection XInput de RealVR64 (le jeu appelle son
+    // export, pas la fonction système : les hooks ci-dessus ne suffisent pas).
+    if (!InstallRealVRXInputStubPatch())
+        LogMsg("[Proxy-Input] RealVR64 XInput stub not ready yet (watcher will retry)");
 
     // 5. Lancer le thread d'écoute autonome pour F6 et Select+L3
     CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InputWatcherThread, NULL, 0, &g_inputWatcherThreadId);
@@ -422,7 +1150,7 @@ int WINAPI Proxy_NVSDK_NGX_D3D12_CreateFeature(void* pCmdList, int FeatureId, vo
 // ============================================================================
 
 #define HUD_WIDTH  480
-#define HUD_HEIGHT 220
+#define HUD_HEIGHT 248
 
 struct HUDColor {
     uint8_t r, g, b, a;
@@ -442,13 +1170,30 @@ static float g_workingScale = 0.75f;        // [DlssNr] WorkingScale (0.50x, 0.6
 static bool g_runBeforeSR = true;           // [DlssNr] RunBeforeSR (Pre-SR vs Post-SR)
 static int g_nrPreset = 2;                  // [DlssNr] Preset (0, 1, 2)
 static bool g_residualAcrossRR = true;      // [DlssNr] ResidualAcrossRR (true/false)
-static float g_nrIntensity = 1.00f;         // [DlssNr] Intensity
+static float g_nrIntensity = 1.00f;         // [DlssNr] Intensity (detail strength, 0.00 - 2.00)
+static int g_nrStyle = 0;                   // [DlssNr] Style (0 Standard, 1 Natural, 2 Cinematic)
 static int g_hudScale = 1;                  // [VRHUD] HUDScale (0: 1.0x Compact, 1: 1.5x Balanced, 2: 2.0x Comfort)
-static int g_activeRow = 0;                 // 0 to 5
+static int g_activeRow = 0;                 // 0 to 6
 static int g_hudPosIndex = 0;               // [VRHUD] HUDPosition (0: Bottom-Center, 1: Top-Center, 2: Top-Right, 3: Top-Left)
-static int g_liveHz = 72;
+static int g_liveHz = 72;                   // measured FPS (HUD badge)
+static int g_hmdHz = 72;                    // native HMD refresh (V-Sync budget)
 static bool g_frameGuardActive = true;      // [VRHUD] FrameGuard (auto drop scale on VR cliff)
 static bool g_frameGuardTriggered = false;
+static double g_gpuMsAvg = 0.0;             // SteamVR per-frame GPU ms (smoothed)
+
+static void VrCtlPublish()
+{
+    if (!VrCtlEnsure()) return;
+
+    g_vrCtl->enabled = g_masterEnable ? 1 : 0;
+    g_vrCtl->workingScale = g_workingScale;
+    g_vrCtl->runBeforeSR = g_runBeforeSR ? 1 : 0;
+    g_vrCtl->residualAcrossRR = g_residualAcrossRR ? 1 : 0;
+    g_vrCtl->preset = g_nrPreset;
+    g_vrCtl->intensity = g_nrIntensity;
+    g_vrCtl->style = g_nrStyle;
+    InterlockedIncrement(&g_vrCtl->seq);
+}
 
 // ----------------------------------------------------------------------------
 // Deferred process priority boost.
@@ -551,7 +1296,10 @@ static void InitVariablesFromAddonOrIni()
         char intStr[32] = {0};
         GetPrivateProfileStringA("DlssNr", "Intensity", "1.00", intStr, sizeof(intStr), g_iniPath);
         g_nrIntensity = (float)atof(intStr);
-        if (g_nrIntensity <= 0.01f || g_nrIntensity > 10.0f) g_nrIntensity = 1.00f;
+        if (g_nrIntensity < 0.0f || g_nrIntensity > 2.0f) g_nrIntensity = 1.00f;
+
+        g_nrStyle = GetPrivateProfileIntA("DlssNr", "Style", 0, g_iniPath);
+        if (g_nrStyle < 0 || g_nrStyle > 2) g_nrStyle = 0;
 
         g_hudScale = GetPrivateProfileIntA("VRHUD", "HUDScale", 1, g_iniPath);
         if (g_hudScale < 0 || g_hudScale > 2) g_hudScale = 1;
@@ -578,12 +1326,15 @@ static void InitVariablesFromAddonOrIni()
         if (g_hudPosIndex < 0 || g_hudPosIndex > 3) g_hudPosIndex = 0;
     }
 
-    char buf[256];
+    char buf[320];
     sprintf_s(buf, sizeof(buf), 
-        "[VR-DLSS5-HUD] Initialized from %s: Enable=%d, WorkingScale=%.2f, RunBeforeSR=%d, Preset=%d, ResidualRR=%d, Scale=%d, Pos=%d",
+        "[VR-DLSS5-HUD] Initialized from %s: Enable=%d, WorkingScale=%.2f, RunBeforeSR=%d, Preset=%d, ResidualRR=%d, Intensity=%.2f, Style=%d, Scale=%d, Pos=%d",
         g_iniPath, g_masterEnable ? 1 : 0, g_workingScale, g_runBeforeSR ? 1 : 0, g_nrPreset, g_residualAcrossRR ? 1 : 0,
-        g_hudScale, g_hudPosIndex);
+        g_nrIntensity, g_nrStyle, g_hudScale, g_hudPosIndex);
     LogMsg(buf);
+
+    // Seed the live channel so a mid-session OptiScaler start adopts current values.
+    VrCtlPublish();
 }
 
 static void CommitSettingsToDisk()
@@ -612,6 +1363,10 @@ static void CommitSettingsToDisk()
         sprintf_s(intBuf, sizeof(intBuf), "%.2f", g_nrIntensity);
         WritePrivateProfileStringA("DlssNr", "Intensity", intBuf, g_iniPath);
 
+        char styleBuf[32];
+        sprintf_s(styleBuf, sizeof(styleBuf), "%d", g_nrStyle);
+        WritePrivateProfileStringA("DlssNr", "Style", styleBuf, g_iniPath);
+
         char hudScaleBuf[32], hudPosBuf[32], guardBuf[32];
         sprintf_s(hudScaleBuf, sizeof(hudScaleBuf), "%d", g_hudScale);
         sprintf_s(hudPosBuf, sizeof(hudPosBuf), "%d", g_hudPosIndex);
@@ -632,11 +1387,16 @@ static void CommitSettingsToDisk()
         WritePrivateProfileSectionA("RenoDX.DLSS5", secBuf, g_iniPath);
     }
 
-    char logBuf[256];
+    char logBuf[320];
     sprintf_s(logBuf, sizeof(logBuf), 
-        "[VR-DLSS5-HUD] Settings committed to %s: Enable=%d, WorkingScale=%.2f, PreSR=%d, Preset=%d, ResidualRR=%d",
-        g_iniPath, g_masterEnable ? 1 : 0, g_workingScale, g_runBeforeSR ? 1 : 0, g_nrPreset, g_residualAcrossRR ? 1 : 0);
+        "[VR-DLSS5-HUD] Settings committed to %s: Enable=%d, WorkingScale=%.2f, PreSR=%d, Preset=%d, ResidualRR=%d, Intensity=%.2f, Style=%d",
+        g_iniPath, g_masterEnable ? 1 : 0, g_workingScale, g_runBeforeSR ? 1 : 0, g_nrPreset, g_residualAcrossRR ? 1 : 0,
+        g_nrIntensity, g_nrStyle);
     LogMsg(logBuf);
+
+    // Push to the running OptiScaler instance (its Config is only read from the
+    // INI at startup). This is what makes the HUD rows take effect live.
+    VrCtlPublish();
 }
 
 // ----------------------------------------------------------------------------
@@ -668,7 +1428,8 @@ static void InitGDIRasterizer()
 }
 
 static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, float workingScale, bool runBeforeSR, 
-                            int preset, bool residualAcrossRR, int posIdx, int scaleMode, int activeRow, int liveHz, bool frameGuardTriggered)
+                            int preset, bool residualAcrossRR, float nrIntensity, int nrStyle,
+                            int posIdx, int scaleMode, int activeRow, int liveHz, bool frameGuardTriggered)
 {
     if (!hdc || !pGdiBits) return;
 
@@ -718,7 +1479,7 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     // Hz & Status Pill Badge (Wider box: 122px wide to comfortably fit 144 Hz | ACTIVE)
     SelectObject(hdc, hFontBadge);
     char badgeBuf[32];
-    sprintf_s(badgeBuf, sizeof(badgeBuf), "%d Hz  |  %s", liveHz, masterEnable ? "ACTIVE" : "BYPASS");
+    sprintf_s(badgeBuf, sizeof(badgeBuf), "%d FPS  |  %s", liveHz, masterEnable ? "ACTIVE" : "BYPASS");
     COLORREF badgeBg = masterEnable ? RGB(16, 75, 42) : RGB(100, 24, 24);
     COLORREF badgeBorder = masterEnable ? RGB(45, 200, 100) : RGB(220, 60, 60);
     COLORREF badgeText = masterEnable ? RGB(220, 255, 230) : RGB(255, 220, 220);
@@ -742,10 +1503,10 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     LineTo(hdc, HUD_WIDTH - 14, 34);
     DeleteObject(hPenSep);
 
-    // 5. Six Menu Rows: Y positions
-    int rowY[6] = { 38, 64, 90, 116, 142, 168 };
+    // 5. Seven Menu Rows: Y positions
+    int rowY[7] = { 38, 64, 90, 116, 142, 168, 194 };
 
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
         int y = rowY[i];
         bool isActive = (i == activeRow);
 
@@ -786,8 +1547,50 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             RECT rc = { 220, y + 2, 310, y + 21 };
             DrawTextA(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        // ROW 1: VR WorkingScale (0.50x, 0.66x, 0.75x, 1.00x)
+        // ROW 1: DLSS5 Detail (model intensity / detail strength, 0.00 - 2.00)
         else if (i == 1) {
+            TextOutA(hdc, 30, y + 2, "DLSS5 Detail", 12);
+
+            char detailBuf[48];
+            sprintf_s(detailBuf, sizeof(detailBuf), "%.2fx %s", nrIntensity,
+                      nrIntensity <= 0.01f ? "[OFF]" : (nrIntensity <= 0.60f ? "[Subtle]" : (nrIntensity <= 1.40f ? "[Default]" : "[Strong]")));
+
+            SelectObject(hdc, hFontValue);
+            SetTextColor(hdc, isActive ? RGB(255, 240, 120) : RGB(210, 200, 160));
+            TextOutA(hdc, 160, y + 2, detailBuf, (int)strlen(detailBuf));
+
+            int sx = 370, sy = y + 7, sw = 85, sh = 8;
+            int fillW = (int)(sw * (nrIntensity / 2.0f));
+            if (fillW < 0) fillW = 0; if (fillW > sw) fillW = sw;
+            HBRUSH hTrackBg = CreateSolidBrush(RGB(22, 32, 48));
+            HPEN hTrackPen = CreatePen(PS_SOLID, 1, RGB(45, 68, 98));
+            SelectObject(hdc, hTrackBg);
+            SelectObject(hdc, hTrackPen);
+            RoundRect(hdc, sx, sy, sx + sw, sy + sh, 4, 4);
+            DeleteObject(hTrackBg);
+            DeleteObject(hTrackPen);
+            if (fillW > 0) {
+                HBRUSH hFill = CreateSolidBrush(RGB(230, 170, 0));
+                HPEN hFillPen = CreatePen(PS_NULL, 0, 0);
+                SelectObject(hdc, hFill);
+                SelectObject(hdc, hFillPen);
+                RoundRect(hdc, sx, sy, sx + fillW, sy + sh, 4, 4);
+                DeleteObject(hFill);
+                DeleteObject(hFillPen);
+            }
+        }
+        // ROW 2: DLSS5 Style (0 Standard, 1 Natural, 2 Cinematic)
+        else if (i == 2) {
+            TextOutA(hdc, 30, y + 2, "DLSS5 Style", 11);
+
+            static const char* styleNames[3] = { "Standard", "Natural", "Cinematic" };
+            SelectObject(hdc, hFontValue);
+            SetTextColor(hdc, isActive ? RGB(255, 240, 120) : RGB(210, 200, 160));
+            const char* styleTxt = styleNames[nrStyle % 3];
+            TextOutA(hdc, 160, y + 2, styleTxt, (int)strlen(styleTxt));
+        }
+        // ROW 3: VR WorkingScale (0.50x, 0.66x, 0.75x, 1.00x)
+        else if (i == 3) {
             TextOutA(hdc, 30, y + 2, "VR WorkingScale", 15);
 
             const char* scaleDesc = "0.75x [72fps Solid]";
@@ -837,8 +1640,8 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             DeleteObject(hThumb);
             DeleteObject(hThumbPen);
         }
-        // ROW 2: Placement Mode (Pre-SR vs Post-SR)
-        else if (i == 2) {
+        // ROW 5: Placement Mode (Pre-SR vs Post-SR)
+        else if (i == 5) {
             TextOutA(hdc, 30, y + 2, "Placement Mode", 14);
 
             SelectObject(hdc, hFontBadge);
@@ -857,8 +1660,8 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             RECT rc = { 160, y + 2, 455, y + 21 };
             DrawTextA(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        // ROW 3: AI Model Preset (0, 1, 2)
-        else if (i == 3) {
+        // ROW 4: AI Model Preset (0, 1, 2)
+        else if (i == 4) {
             TextOutA(hdc, 30, y + 2, "AI Model Preset", 15);
 
             const char* presetNames[3] = { 
@@ -870,34 +1673,15 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             SetTextColor(hdc, isActive ? RGB(255, 240, 120) : RGB(210, 200, 160));
             TextOutA(hdc, 160, y + 2, presetNames[preset % 3], (int)strlen(presetNames[preset % 3]));
         }
-        // ROW 4: Ray Recon (RR) - ResidualAcrossRR
-        else if (i == 4) {
-            TextOutA(hdc, 30, y + 2, "Ray Recon (RR)", 14);
-
-            SelectObject(hdc, hFontBadge);
-            const char* rrTxt = residualAcrossRR ? "ResidualAcrossRR [ON - Preserved]" : "ResidualAcrossRR [OFF - Standard]";
-            COLORREF rrBg = residualAcrossRR ? RGB(16, 60, 85) : RGB(50, 50, 55);
-            COLORREF rrBd = residualAcrossRR ? RGB(0, 200, 255) : RGB(100, 100, 110);
-            HBRUSH hrrB = CreateSolidBrush(rrBg);
-            HPEN hrrP = CreatePen(PS_SOLID, 1, rrBd);
-            SelectObject(hdc, hrrB);
-            SelectObject(hdc, hrrP);
-            RoundRect(hdc, 160, y + 2, 455, y + 21, 6, 6);
-            DeleteObject(hrrB);
-            DeleteObject(hrrP);
-
-            SetTextColor(hdc, RGB(255, 255, 255));
-            RECT rcRR = { 160, y + 2, 455, y + 21 };
-            DrawTextA(hdc, rrTxt, -1, &rcRR, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-        // ROW 5: VR HUD Display (Position & Scale)
-        else if (i == 5) {
+        // ROW 6: VR HUD Display (position & scale)
+        else if (i == 6) {
             TextOutA(hdc, 30, y + 2, "VR HUD Display", 14);
 
             static const char* posNames[4] = { "Bottom-Center", "Top-Center", "Top-Right", "Top-Left" };
             static const char* scaleNames[3] = { "1.0x (Pimax)", "1.5x (Q3)", "2.0x (Large)" };
-            char dispBuf[64];
-            sprintf_s(dispBuf, sizeof(dispBuf), "Pos: %s  |  Scale: %s", posNames[posIdx % 4], scaleNames[scaleMode % 3]);
+            char dispBuf[72];
+            sprintf_s(dispBuf, sizeof(dispBuf), "Pos: %s  |  Scale: %s",
+                      posNames[posIdx % 4], scaleNames[scaleMode % 3]);
             SelectObject(hdc, hFontValue);
             SetTextColor(hdc, isActive ? RGB(255, 220, 100) : RGB(210, 200, 150));
             TextOutA(hdc, 160, y + 2, dispBuf, (int)strlen(dispBuf));
@@ -907,14 +1691,14 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     // 6. Footer Help Bar
     HPEN hPenFoot = CreatePen(PS_SOLID, 1, RGB(30, 50, 75));
     SelectObject(hdc, hPenFoot);
-    MoveToEx(hdc, 14, 196, NULL);
-    LineTo(hdc, HUD_WIDTH - 14, 196);
+    MoveToEx(hdc, 14, 224, NULL);
+    LineTo(hdc, HUD_WIDTH - 14, 224);
     DeleteObject(hPenFoot);
 
     SelectObject(hdc, hFontHelp);
     SetTextColor(hdc, RGB(120, 160, 200));
-    RECT rcHelp = { 16, 198, HUD_WIDTH - 16, HUD_HEIGHT - 2 };
-    DrawTextA(hdc, "D-Pad: Navigate / Adjust  |  A: Toggle  |  Select+L3 / F6: Close", -1, &rcHelp, DT_CENTER | DT_SINGLELINE);
+    RECT rcHelp = { 16, 226, HUD_WIDTH - 16, HUD_HEIGHT - 2 };
+    DrawTextA(hdc, "D-Pad: Navigate / Adjust  |  A: Toggle  |  F8: Ray Recon  |  Tab/F7: HUD  |  F6: Close", -1, &rcHelp, DT_CENTER | DT_SINGLELINE);
 
     // Cleanup GDI objects
     SelectObject(hdc, hOldBrush);
@@ -1070,9 +1854,12 @@ uint32_t VR_CALLTYPE VR_GetInitToken()
 // Zero-Crash, 100% Decoupled from Game Engine & D3D12 Pipeline
 // ----------------------------------------------------------------------------
 static vr::IVROverlay* g_pVROverlay = NULL;
+static vr::IVRSystem* g_pVRSystem = NULL;
 static vr::VROverlayHandle_t g_hVROverlay = vr::k_ulOverlayHandleInvalid;
 static bool g_openvrInitialized = false;
 static uint64_t g_lastOpenVRInitAttempt = 0;
+static int g_overlayFailCount = 0;
+static uint64_t g_overlayRetryAfterTick = 0;
 
 static void ApplyOverlayTransformAndScale()
 {
@@ -1148,15 +1935,17 @@ static bool EnsureOpenVROverlay()
             return false;
         }
         g_openvrInitialized = true;
+        g_pVRSystem = pSys;
         LogMsg("[OpenVR-Overlay] Successfully connected to SteamVR Compositor (VRApplication_Overlay)");
 
         // Query native HMD refresh rate from SteamVR
         vr::ETrackedPropertyError propErr = vr::TrackedProp_Success;
         float freq = pSys->GetFloatTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_DisplayFrequency_Float, &propErr);
         if (propErr == vr::TrackedProp_Success && freq >= 60.0f && freq <= 240.0f) {
-            g_liveHz = (int)(freq + 0.5f);
+            g_hmdHz = (int)(freq + 0.5f);
+            g_liveHz = g_hmdHz;
             char hzBuf[128];
-            sprintf_s(hzBuf, sizeof(hzBuf), "[OpenVR-Overlay] Native HMD refresh rate detected: %d Hz", g_liveHz);
+            sprintf_s(hzBuf, sizeof(hzBuf), "[OpenVR-Overlay] Native HMD refresh rate detected: %d Hz", g_hmdHz);
             LogMsg(hzBuf);
         }
     }
@@ -1170,13 +1959,32 @@ static bool EnsureOpenVROverlay()
     }
 
     if (g_hVROverlay == vr::k_ulOverlayHandleInvalid) {
-        vr::EVROverlayError ovrErr = g_pVROverlay->CreateOverlay("VRDLSS5_HUD", "DLSS 5 VR Controller", &g_hVROverlay);
+        uint64_t now = GetTickCount64();
+        if (now < g_overlayRetryAfterTick)
+            return false;
+
+        // Unique key per process: auxiliary child processes also load this proxy
+        // from the game folder and would otherwise collide (VROverlayError_KeyInUse).
+        char overlayKey[64];
+        sprintf_s(overlayKey, sizeof(overlayKey), "VRDLSS5_HUD_%lu", GetCurrentProcessId());
+
+        g_hVROverlay = vr::k_ulOverlayHandleInvalid;
+        vr::EVROverlayError ovrErr = g_pVROverlay->CreateOverlay(overlayKey, "DLSS 5 VR Controller", &g_hVROverlay);
         if (ovrErr != vr::VROverlayError_None) {
-            char buf[128];
-            sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] CreateOverlay failed: %d", ovrErr);
+            // OpenVR can leave a non-invalid handle on failure; never let it
+            // reach SetOverlayRaw, or the self-heal loop spams SteamVR forever.
+            g_hVROverlay = vr::k_ulOverlayHandleInvalid;
+
+            g_overlayFailCount = (g_overlayFailCount < 30) ? g_overlayFailCount + 1 : 30;
+            g_overlayRetryAfterTick = now + (uint64_t)(1000 * g_overlayFailCount);
+
+            char buf[160];
+            sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] CreateOverlay failed: %d (retry in %d ms)",
+                      ovrErr, 1000 * g_overlayFailCount);
             LogMsg(buf);
             return false;
         }
+        g_overlayFailCount = 0;
         g_pVROverlay->SetOverlayAlpha(g_hVROverlay, 0.96f);
         ApplyOverlayTransformAndScale();
         LogMsg("[OpenVR-Overlay] SteamVR Overlay created and armed successfully!");
@@ -1241,6 +2049,9 @@ static void UpdateOpenVROverlay(bool visible, bool isDirty)
                 } else {
                     sprintf_s(buf, sizeof(buf), "[OpenVR-Overlay] Recovery retry error: %d", retryErr);
                     LogMsg(buf);
+                    // Back off so a persistent failure cannot hammer SteamVR IPC
+                    g_overlayFailCount = (g_overlayFailCount < 30) ? g_overlayFailCount + 1 : 30;
+                    g_overlayRetryAfterTick = GetTickCount64() + (uint64_t)(1000 * g_overlayFailCount);
                 }
             }
         }
@@ -1355,6 +2166,16 @@ static void PollInput()
             g_hudVisible ? "OPEN" : "CLOSED",
             g_keys[VK_F6].justPressed ? "Keyboard F6" : "Gamepad Select+L3");
         LogMsg(buf);
+
+        if (!g_hudVisible) {
+            LONG masked = InterlockedExchange(&g_dpadMaskedSamples, 0);
+            if (masked > 0) {
+                char maskBuf[128];
+                sprintf_s(maskBuf, sizeof(maskBuf),
+                    "[Proxy-Input] D-Pad samples masked while HUD was open: %ld", masked);
+                LogMsg(maskBuf);
+            }
+        }
     }
 
     if (!g_hudVisible) return;
@@ -1369,6 +2190,19 @@ static void PollInput()
     UpdateKey(VK_RIGHT, now);
     UpdateKey(VK_SPACE, now);
     UpdateKey(VK_RETURN, now);
+    UpdateKey(VK_F8, now);
+
+    // F8: toggle ResidualAcrossRR without occupying a HUD row
+    if (g_keys[VK_F8].justPressed) {
+        g_residualAcrossRR = !g_residualAcrossRR;
+        g_hudDirty = true;
+        g_hasPendingSave = true;
+        g_lastChangeTick = now;
+        char rrBuf[96];
+        sprintf_s(rrBuf, sizeof(rrBuf), "[VR-DLSS5-HUD] ResidualAcrossRR toggled: %s",
+                  g_residualAcrossRR ? "ON" : "OFF");
+        LogMsg(rrBuf);
+    }
 
     // Close HUD: Escape (Keyboard)
     if (g_keys[VK_ESCAPE].justPressed) {
@@ -1376,6 +2210,13 @@ static void PollInput()
         g_hudDirty = true;
         s_lastToggleTick = now;
         LogMsg("[VR-DLSS5-HUD] Overlay closed via Escape");
+        LONG masked = InterlockedExchange(&g_dpadMaskedSamples, 0);
+        if (masked > 0) {
+            char maskBuf[128];
+            sprintf_s(maskBuf, sizeof(maskBuf),
+                "[Proxy-Input] D-Pad samples masked while HUD was open: %ld", masked);
+            LogMsg(maskBuf);
+        }
         return;
     }
 
@@ -1394,10 +2235,9 @@ static void PollInput()
     }
     s_prevPadY = padY;
 
-    // Direct Scale Toggle: F7 (Keyboard) or R3 (Right Stick Click: Xbox 0x0080 / DualSense bit 11 = 0x0800)
-    static bool s_prevPadR3 = false;
-    bool padR3 = ((xButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0) || ((dButtons & 0x0800) != 0);
-    if (g_keys[VK_F7].justPressed || (padR3 && !s_prevPadR3)) {
+    // Scale Toggle: F7 keyboard only. The R3 gamepad binding was removed; scale
+    // and position now live in the "VR HUD Display" menu row.
+    if (g_keys[VK_F7].justPressed) {
         g_hudScale = (g_hudScale + 1) % 3;
         g_hudDirty = true;
         static const char* scaleNames[] = { "1.0x (Compact)", "1.5x (Balanced Q3)", "2.0x (Comfort Q3)" };
@@ -1407,9 +2247,8 @@ static void PollInput()
         g_hasPendingSave = true;
         g_lastChangeTick = now;
     }
-    s_prevPadR3 = padR3;
 
-    // Navigate Rows (6 rows: 0 to 5) - PURE DIGITAL D-PAD (pas de parasitage par le stick analogique)
+    // Navigate Rows (7 rows: 0 to 6) - PURE DIGITAL D-PAD (pas de parasitage par le stick analogique)
     static bool s_prevPadUp = false;
     static bool s_prevPadDown = false;
     bool padUp = ((xButtons & XINPUT_GAMEPAD_DPAD_UP) != 0) || 
@@ -1418,11 +2257,11 @@ static void PollInput()
                    (dinputConnected && (jie.dwPOV == 18000 || jie.dwPOV == 13500 || jie.dwPOV == 22500));
 
     if (g_keys[VK_UP].justPressed || (padUp && !s_prevPadUp)) {
-        g_activeRow = (g_activeRow + 5) % 6;
+        g_activeRow = (g_activeRow + 6) % 7;
         g_hudDirty = true;
     }
     if (g_keys[VK_DOWN].justPressed || (padDown && !s_prevPadDown)) {
-        g_activeRow = (g_activeRow + 1) % 6;
+        g_activeRow = (g_activeRow + 1) % 7;
         g_hudDirty = true;
     }
     s_prevPadUp = padUp;
@@ -1476,7 +2315,30 @@ static void PollInput()
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 1) { // VR WorkingScale (0.50x, 0.66x, 0.75x, 1.00x)
+    else if (g_activeRow == 1) { // DLSS5 Detail (Intensity 0.00 - 2.00, step 0.25)
+        if (actionTrigger) {
+            g_nrIntensity = 1.00f;
+            valueChanged = true;
+        } else if (actLeft && g_nrIntensity > 0.0f) {
+            g_nrIntensity -= 0.25f;
+            if (g_nrIntensity < 0.0f) g_nrIntensity = 0.0f;
+            valueChanged = true;
+        } else if (actRight && g_nrIntensity < 2.0f) {
+            g_nrIntensity += 0.25f;
+            if (g_nrIntensity > 2.0f) g_nrIntensity = 2.0f;
+            valueChanged = true;
+        }
+    }
+    else if (g_activeRow == 2) { // DLSS5 Style (0 Standard, 1 Natural, 2 Cinematic)
+        if (actionTrigger || actRight) {
+            g_nrStyle = (g_nrStyle + 1) % 3;
+            valueChanged = true;
+        } else if (actLeft) {
+            g_nrStyle = (g_nrStyle + 2) % 3;
+            valueChanged = true;
+        }
+    }
+    else if (g_activeRow == 3) { // VR WorkingScale (0.50x, 0.66x, 0.75x, 1.00x)
         if (actLeft) {
             if (g_workingScale > 0.85f) g_workingScale = 0.75f;
             else if (g_workingScale > 0.70f) g_workingScale = 0.66f;
@@ -1490,13 +2352,7 @@ static void PollInput()
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 2) { // Placement Mode (Pre-SR vs Post-SR)
-        if (actionTrigger || actLeft || actRight) {
-            g_runBeforeSR = !g_runBeforeSR;
-            valueChanged = true;
-        }
-    }
-    else if (g_activeRow == 3) { // AI Model Preset (0, 1, 2)
+    else if (g_activeRow == 4) { // AI Model Preset (0, 1, 2)
         if (actionTrigger || actRight) {
             g_nrPreset = (g_nrPreset + 1) % 3;
             valueChanged = true;
@@ -1505,13 +2361,13 @@ static void PollInput()
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 4) { // Ray Recon (RR) - ResidualAcrossRR
+    else if (g_activeRow == 5) { // Placement Mode (Pre-SR vs Post-SR)
         if (actionTrigger || actLeft || actRight) {
-            g_residualAcrossRR = !g_residualAcrossRR;
+            g_runBeforeSR = !g_runBeforeSR;
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 5) { // VR HUD Display (Position & Scale)
+    else if (g_activeRow == 6) { // VR HUD Display (Position & Scale)
         if (actLeft) {
             g_hudPosIndex = (g_hudPosIndex + 3) % 4;
             valueChanged = true;
@@ -1682,6 +2538,75 @@ static void ApplyDeferredPriorityBoost()
     g_priorityBoosted = true;
 }
 
+// ----------------------------------------------------------------------------
+// SteamVR frame timing: the only reliable VR telemetry we have (the NGX
+// evaluate export is not on Cyberpunk's path, so g_evalFrameCounter stays 0).
+// Drives the measured FPS badge and the Dynamic VR Frame Guard.
+// ----------------------------------------------------------------------------
+static void UpdateVrFrameTiming(uint64_t now)
+{
+    static uint64_t s_lastSample = 0;
+    if (!g_pVRSystem) return;
+    if (now - s_lastSample < 500) return;
+    s_lastSample = now;
+
+    vr::IVRCompositor* pCompositor = vr::VRCompositor();
+    if (!pCompositor)
+        return;
+
+    vr::Compositor_FrameTiming timing = {};
+    timing.m_nSize = sizeof(timing);
+    if (!pCompositor->GetFrameTiming(&timing, 0))
+        return;
+
+    if (timing.m_flClientFrameIntervalMs > 0.01f)
+    {
+        float fps = 1000.0f / timing.m_flClientFrameIntervalMs;
+        if (fps >= 1.0f && fps <= 240.0f)
+        {
+            int measured = (int)(fps + 0.5f);
+            if (measured != g_liveHz)
+            {
+                g_liveHz = measured;
+                if (g_hudVisible) g_hudDirty = true;
+            }
+        }
+    }
+
+    if (timing.m_flTotalRenderGpuMs > 0.0f && timing.m_flTotalRenderGpuMs < 100.0f)
+        g_gpuMsAvg = (g_gpuMsAvg * 0.7) + ((double)timing.m_flTotalRenderGpuMs * 0.3);
+
+    const int budgetHz = (g_hmdHz > 0) ? g_hmdHz : 72;
+    const double budgetMs = 1000.0 / (double)budgetHz;
+    const bool reprojecting = timing.m_nNumFramePresents >= 2;
+
+    // Only react to a sustained condition (~1.5 s) so loading hitches or a
+    // single late frame cannot silently drop the model resolution.
+    static int s_hotSamples = 0;
+    const bool hot = (g_gpuMsAvg > (budgetMs - 0.88)) || reprojecting;
+    s_hotSamples = hot ? (s_hotSamples + 1) : 0;
+
+    // Dynamic VR Frame Guard: drop WorkingScale one notch when the GPU frame time
+    // approaches the V-Sync cliff (or SteamVR is already synthesizing frames).
+    if (g_frameGuardActive && g_workingScale > 0.50f && s_hotSamples >= 3)
+    {
+        float oldScale = g_workingScale;
+        if (g_workingScale > 0.70f) g_workingScale = 0.66f;
+        else g_workingScale = 0.50f;
+
+        g_frameGuardTriggered = true;
+        g_hudDirty = true;
+        g_hasPendingSave = true;
+        g_lastChangeTick = now;
+
+        char guardBuf[256];
+        sprintf_s(guardBuf, sizeof(guardBuf),
+            "[VR-DLSS5-GUARD] GPU %.2f ms / budget %.2f ms (%d Hz, %u presents) -> WorkingScale %.2f -> %.2f",
+            g_gpuMsAvg, budgetMs, budgetHz, timing.m_nNumFramePresents, oldScale, g_workingScale);
+        LogMsg(guardBuf);
+    }
+}
+
 static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
 {
     LogMsg("[Proxy] Input Watcher Thread started.");
@@ -1721,12 +2646,85 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         }
 
         // Intercepter dynamiquement de nouveaux modules XInput si charges tardivement
+        // et re-verifier le stub RealVR64 (LukeRoss peut le reconstruire).
         static uint64_t s_lastHookCheck = 0;
         static int s_hookChecks = 0;
-        if (s_hookChecks < 10 && (now - s_lastHookCheck >= 1000)) {
+        if (now - s_lastHookCheck >= 1000) {
             s_lastHookCheck = now;
-            s_hookChecks++;
-            InstallXInputHooks();
+            if (s_hookChecks < 10) {
+                s_hookChecks++;
+                InstallXInputHooks();
+            }
+            MaintainRealVRXInputStubPatch();
+        }
+
+        // SteamVR frame timing -> measured FPS badge + Frame Guard
+        UpdateVrFrameTiming(now);
+
+        // Diagnostics: competing engines (once modules are loaded) + input path state.
+        static uint64_t s_watcherStart = 0;
+        static bool s_rogueChecked = false;
+        if (s_watcherStart == 0) s_watcherStart = now;
+        if (!s_rogueChecked && (now - s_watcherStart >= 5000)) {
+            s_rogueChecked = true;
+            LogRogueEngineProxies();
+        }
+
+        static uint64_t s_lastDiag = 0;
+        if (s_lastDiag == 0) s_lastDiag = now;
+        if (now - s_lastDiag >= 30000) {
+            s_lastDiag = now;
+            char owner9[64] = {0}, owner14[64] = {0}, ownerIat[64] = {0};
+            {
+                HMODULE h9 = GetModuleHandleA("XINPUT9_1_0.dll");
+                if (h9) GetChainHopOwnerName((void*)GetProcAddress(h9, "XInputGetState"), owner9, sizeof(owner9));
+                HMODULE h14 = GetModuleHandleA("XINPUT1_4.dll");
+                if (h14) GetChainHopOwnerName((void*)GetProcAddress(h14, "XInputGetState"), owner14, sizeof(owner14));
+                void** iatSlot = (void**)FindGameIatSlot("XINPUT", "XInputGetState");
+                if (iatSlot) GetChainHopOwnerName(*iatSlot, ownerIat, sizeof(ownerIat));
+                else strcpy_s(ownerIat, "none");
+            }
+
+            char dbg[768];
+            sprintf_s(dbg, sizeof(dbg),
+                "[Proxy-Diag] hud=%d stubs=%ld iat=%s x9hook=%s x14hook=%s realVr=%ld x9=%ld x14=%ld x14ex=%ld x13=%ld joy=%ld dpadSeen=%ld pov=%ld masked=%ld hidData=%ld hidUsage=%ld hidCaps=%ld hidHat=%ld hidNeutral=%ld steamIn=%ld openvr=%d gpu=%.2fms fps=%d",
+                g_hudVisible ? 1 : 0, (long)InterlockedCompareExchange(&g_realVrPatchCount, 0, 0), ownerIat, owner9, owner14,
+                (long)InterlockedCompareExchange(&g_realVrHookCalls, 0, 0),
+                (long)InterlockedCompareExchange(&g_hookCalls9, 0, 0),
+                (long)InterlockedCompareExchange(&g_hookCalls14, 0, 0),
+                (long)InterlockedCompareExchange(&g_hookCalls14ex, 0, 0),
+                (long)InterlockedCompareExchange(&g_hookCalls13, 0, 0),
+                (long)InterlockedCompareExchange(&g_hookCallsJoy, 0, 0),
+                (long)InterlockedCompareExchange(&g_dpadSeenAny, 0, 0),
+                (long)InterlockedCompareExchange(&g_povSeenAny, 0, 0),
+                (long)InterlockedCompareExchange(&g_dpadMaskedSamples, 0, 0),
+                (long)InterlockedCompareExchange(&g_hidGetData, 0, 0),
+                (long)InterlockedCompareExchange(&g_hidGetUsageValue, 0, 0),
+                (long)InterlockedCompareExchange(&g_hidGetValueCaps, 0, 0),
+                (long)InterlockedCompareExchange(&g_hidHatCount, 0, 0),
+                (long)InterlockedCompareExchange(&g_hidHatsNeutralized, 0, 0),
+                (long)InterlockedCompareExchange(&g_steamDigitalAction, 0, 0),
+                g_openvrInitialized ? 1 : 0, g_gpuMsAvg, g_liveHz);
+            LogMsg(dbg);
+
+            // Per-slot call counts: shows which RealVR thunk the game actually polls.
+            char patchBuf[512];
+            int po = 0;
+            patchBuf[0] = '\0';
+            for (int pi = 0; pi < g_realVrPatchCount; pi++)
+            {
+                long c = InterlockedCompareExchange(&g_realVrPatches[pi].calls, 0, 0);
+                if (c <= 0) continue;
+                int w = sprintf_s(patchBuf + po, sizeof(patchBuf) - po, "%s %s=%ld | ",
+                                  pi ? ";" : "", g_realVrPatches[pi].label, c);
+                if (w > 0 && po + w < (int)sizeof(patchBuf)) po += w;
+            }
+            if (po > 0)
+            {
+                char pLine[576];
+                sprintf_s(pLine, sizeof(pLine), "[Proxy-Diag] thunk calls: %s", patchBuf);
+                LogMsg(pLine);
+            }
         }
 
         // Deferred process priority boost (once, after boot; safe from this thread).
@@ -1779,7 +2777,7 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
                     g_ftMinMs, avg, g_ftMaxMs, g_liveHz);
                 LogMsg(ftBuf);
 
-                int budgetHz = (g_liveHz > 0) ? g_liveHz : 72;
+                int budgetHz = (g_hmdHz > 0) ? g_hmdHz : 72;
                 double budgetMs = 1000.0 / (double)budgetHz;
 
                 // Dynamic VR Frame Guard: if per-eye avg ms approaches V-Sync cliff (within 0.88 ms),
@@ -1825,7 +2823,8 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         bool isDirty = g_hudDirty;
         if (g_hudVisible && isDirty) {
             RenderModernHUD(g_hGdiMemDC, g_pGdiBits, g_masterEnable, g_workingScale, g_runBeforeSR, 
-                            g_nrPreset, g_residualAcrossRR, g_hudPosIndex, g_hudScale, g_activeRow, g_liveHz, g_frameGuardTriggered);
+                            g_nrPreset, g_residualAcrossRR, g_nrIntensity, g_nrStyle,
+                            g_hudPosIndex, g_hudScale, g_activeRow, g_liveHz, g_frameGuardTriggered);
         }
         UpdateOSDWindow(g_hudVisible, isDirty);
         UpdateOpenVROverlay(g_hudVisible, isDirty);

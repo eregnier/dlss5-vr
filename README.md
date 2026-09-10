@@ -37,16 +37,33 @@ The DLSS 5 <> VR HUD is rendered via OpenVR as a native 3D compositor overlay (f
 | :--- | :--- | :--- |
 | **Toggle HUD Menu On/Off** | `Select / Back` + `L3` (Left Stick Click) | `F6` |
 | **Navigate Settings Rows** | `D-Pad Up / Down` | `Up / Down Arrows` |
-| **Adjust Values / Toggle Option** | `D-Pad Left / Right` | `Left / Right Arrows` (or `Space` / `Enter`) |
-| **Cycle HUD Position** | `Y` (Xbox) / `Triangle` (PS5) | `Tab` |
-| **Cycle HUD Scale** | `R3` (Right Stick Click) | `F7` |
+| **Adjust Values / Toggle Option** | `D-Pad Left / Right` / `A` | `Left / Right Arrows` (or `Space` / `Enter`) |
 | **Close HUD** | `Select + L3` / Gamepad combo | `Escape` or `F6` |
+| **Toggle Ray Reconstruction** | — | `F8` |
+| **Cycle HUD Position** | Menu row 6 (`<-` / `->`) or `Y` / `Triangle` | `Tab` |
+| **Cycle HUD Scale** | Menu row 6 (`A`) | `F7` |
 | **OptiScaler Advanced Menu** | — | `Insert` |
 | **LukeRoss VR Mod Menu** | Dedicated VR Menu Button | `Numpad 0-9` |
 
+**HUD rows** (all applied live to the running OptiScaler engine through a shared-memory control channel):
+
+| Row | Setting | Adjust |
+| :--- | :--- | :--- |
+| 0 | **Neural Engine** (`ACTIVE` / `BYPASS`) | `A` or `<-` / `->` |
+| 1 | **DLSS5 Detail** (`Intensity` 0.00x - 2.00x, steps of 0.25) | `<-` / `->`, `A` resets to 1.00x |
+| 2 | **DLSS5 Style** (`Standard` / `Natural` / `Cinematic`) | `<-` / `->` |
+| 3 | **VR WorkingScale** (0.50x / 0.66x / 0.75x / 1.00x) | `<-` / `->` |
+| 4 | **AI Model Preset** (0 / 1 / 2) | `<-` / `->` |
+| 5 | **Placement Mode** (`Pre-SR` / `Post-SR`) | `A` or `<-` / `->` |
+| 6 | **VR HUD Display** (position & scale) | `<-` / `->` position, `A` scale |
+
 > [!NOTE]
-> **Smart D-Pad Isolation**:
-> When the HUD menu is active, D-Pad directional inputs are automatically intercepted and filtered out from the game engine via runtime XInput hooks. You can freely walk with the left analog stick, aim/look around with the right stick, jump, and shoot without accidentally triggering in-game D-pad consumables, potions, or quick inventory slots while adjusting DLSS 5 parameters. Once the menu is closed, D-Pad inputs are immediately restored to the game.
+> **Smart D-Pad Isolation (XInput + HID)**:
+> When the HUD menu is active, D-Pad directional inputs are intercepted before the game sees them. Two paths are covered:
+> - **XInput pads** (`XINPUT1_4`, `XINPUT9_1_0`, `XINPUT1_3`, including the RealVR64 thunks and IAT rewrites): D-Pad bits are masked by thread-aware MinHook detours.
+> - **HID pads** read through the Windows HID parser (Cyberpunk's native DualSense-class path): `HidP_GetData` results have the D-Pad hat switch forced to its centred value.
+>
+> You can freely walk with the left analog stick, aim/look around with the right stick, jump, and shoot without accidentally triggering in-game D-pad consumables, potions, or quick inventory slots while adjusting DLSS 5 parameters. Once the menu is closed, D-Pad inputs are immediately restored to the game.
 
 ---
 
@@ -63,8 +80,9 @@ graph TD
     LukeRoss -->|Native ASI Detection| OptiScaler[OptiScaler.asi / OptiScaler.dll<br/>Pre-SR Multipass Engine]
     OptiScaler -->|Forwarder| Forwarder[nvngx.dll_dlssnr.dll]
     Forwarder -->|Neural Inferences at Pre-SR scale| Model[nvngx_dlssnr.dll<br/>DLSS 5 Model]
+    Proxy -->|Shared memory control block| OptiScaler
     Proxy -->|OpenVR Compositor Overlay + Event Pump| HUD[In-Game 3D Overlay & HUD<br/>Segoe UI Vector Render]
-    Proxy -->|MinHook XInput Detours| Input[Gamepad D-Pad Filter<br/>Game input masked during HUD]
+    Proxy -->|MinHook XInput Detours + RealVR Thunks + IAT + HID Hat Masking| Input[Gamepad D-Pad Filter<br/>Game input masked during HUD]
     Proxy -->|Exports 24 System Symbols| DXGI[C:\Windows\System32\dxgi.dll]
 ```
 
@@ -76,11 +94,13 @@ graph TD
 3. **Ray Reconstruction Compatibility (`ResidualAcrossRR`)**:
    Preserves high-frequency neural reconstructed detail across Cyberpunk 2077's Ray Reconstruction denoiser without flicker or smearing.
 4. **Dynamic VR Frame Guard**:
-   Continuously monitors per-eye GPU frametimes against the V-Sync budget (e.g. 13.88 ms at 72 Hz). If frametimes approach the threshold, it dynamically adapts `WorkingScale` to safeguard against ASW/reprojection cliffs.
+   Samples SteamVR compositor frame timing (`IVRCompositor::GetFrameTiming`, per-frame GPU ms + present count) and only acts after ~1.5 s of sustained pressure. When the budget is threatened it drops `WorkingScale` one notch and pushes the change live to OptiScaler, safeguarding against ASW/reprojection cliffs.
 5. **OpenVR Compositor Overlay with Self-Healing Auto-Recovery**:
-   Renders a vector-crisp Segoe UI overlay directly through OpenVR (`IVROverlay::SetOverlayRaw`). Continuously drains the OpenVR IPC event queue via `PollNextOverlayEvent()` to prevent buffer saturation (OpenVR error 23 / `VROverlayError_RequestFailed`), and features automatic self-healing recovery that seamlessly recreates the overlay handle if SteamVR resets or enters standby.
-6. **MinHook D-Pad Isolation**:
-   Hooks `XInputGetState` (and ordinal 100 `XInputGetStateEx`) on all loaded modules (`RealVR64.dll`, local and system `XINPUT1_4.dll`, `XINPUT1_3.dll`, `XINPUT9_1_0.dll`, and `joyGetPosEx`). Thread-aware filtering guarantees that the HUD thread receives unmasked controller input while the game engine's D-Pad bits are masked only when the menu is open.
+   Renders a vector-crisp Segoe UI overlay directly through OpenVR (`IVROverlay::SetOverlayRaw`). Continuously drains the OpenVR IPC event queue via `PollNextOverlayEvent()` to prevent buffer saturation (OpenVR error 23 / `VROverlayError_RequestFailed`), and features automatic self-healing recovery that seamlessly recreates the overlay handle if SteamVR resets or enters standby. A per-PID overlay key and a retry backoff keep auxiliary child processes from colliding with the game's overlay.
+6. **XInput + HID D-Pad Isolation**:
+   Hooks `XInputGetState` (named and ordinal 100 `XInputGetStateEx`) on `XINPUT1_4.dll`, `XINPUT1_3.dll`, `XINPUT9_1_0.dll`, `joyGetPosEx`, the RealVR64 `FF 25` XInput thunks (all slots, re-validated every second) and the game's own IAT slots. Games that read the pad through the Windows HID parser (Cyberpunk's native DualSense-class path) are covered by neutralising the D-Pad hat switch inside `HidP_GetData` while the HUD is open. Thread-aware filtering guarantees the HUD thread always receives unmasked controller input.
+7. **Live OptiScaler Control Channel**:
+   OptiScaler only reads `OptiScaler.ini` at startup, so the HUD publishes every change (Enabled, WorkingScale, RunBeforeSR, ResidualAcrossRR, Preset, Intensity, Style) through a `Local\VRDLSS5_Control_1_<pid>` shared-memory block. The bundled patched OptiScaler build (`deps/OptiScaler.dll`, wilsjo2 v0.7.6 + control channel) applies changes to its live Config and acknowledges them; the INI remains the persistent store.
 
 ---
 
@@ -175,16 +195,21 @@ dlss5-vr/
 │   └── README.md                  # Proxy internals & thread model
 │
 ├── deps/                          # Redistributable Helper Binaries
-│   ├── ReShade64_dlss5.dll        # ReShade 6.8+ with neutralized OpenVR hooks
-│   ├── renodx-dlss5.addon64       # RenoDX DLSS 5 add-on
+│   ├── OptiScaler.dll             # OptiScaler Pre-SR engine, wilsjo2 v0.7.6 + VR control channel
+│   ├── OptiScaler/                # OptiScaler backends (D3D12, FSR/XeSS, NVFP4 kernels)
+│   ├── OptiScaler.ini             # Default engine configuration
+│   ├── nvngx.dll_dlssnr.dll       # NVIDIA signature forwarder
 │   ├── cudart64_12.dll            # NVIDIA CUDA 12 runtime
 │   └── README.md
 │
 ├── tools/                         # Developer Live Diagnostics (Python)
 │   ├── diag.py                    # Process RAM hooks & injection inspector
-│   ├── tail_log.py                # Dual log tailer (ReShade + LukeRoss)
-│   ├── analyze_eval.py            # Profiler for stereo frame timings
-│   ├── patch_workset.py           # Memory working set manager
+│   ├── tail_log.py                # Dual log tailer (proxy + OptiScaler + LukeRoss)
+│   ├── dlss5_binary_inspector.py  # PE / CUDA / signature inspector
+│   ├── optiscaler_vr_configurator.py # Cyberpunk VR INI generator
+│   ├── vr_perf_simulator.py       # RunBeforeSR/WorkingScale cost model
+│   ├── deploy_optiscaler_vr.ps1   # One-click OptiScaler VR deployment
+│   ├── audit/                     # RealVR64 / DXGI disassembly audits
 │   └── README.md
 │
 ├── vr-dlss5-patch/                # Headless Go CLI Automation Tool
@@ -192,7 +217,7 @@ dlss5-vr/
 │   └── README.md
 │
 ├── package_release.bat            # Automated 1-click CI/CD packaging script (.zip)
-├── VERSION                        # Current SemVer release (e.g. 1.0.0)
+├── VERSION                        # Current SemVer release (e.g. 1.1.0)
 ├── LICENSE                        # MIT License + Third-Party Notices
 └── README.md                      # This document
 ```

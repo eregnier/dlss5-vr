@@ -1,0 +1,102 @@
+=== CARTOGRAPHIE DU PIPELINE EVALUATION RENODX ===
+STRING: 'inline feature 18 evaluation succeeded' file=0x166A2A RVA=0x16782A
+  -> XREF file=0xA23B RVA=0xAC3B pre=488d15
+STRING: 'feature 18 created via' file=0x169C09 RVA=0x16AA09
+  -> XREF file=0x1030C RVA=0x10D0C pre=488d15
+STRING: 'feature 18 evaluate failed' file=0x1668F9 RVA=0x1676F9
+  -> XREF file=0xA3D2 RVA=0xADD2 pre=488d15
+STRING: 'not in registry' file=0x16643D RVA=0x16723D
+STRING: 'skipping inline NR' file=0x16B22A RVA=0x16C02A
+STRING: 'first NGX evaluate intercepted' file=0x16B162 RVA=0x16BF62
+  -> XREF file=0x36D87 RVA=0x37787 pre=4c8d05
+  -> XREF file=0x37247 RVA=0x37C47 pre=4c8d05
+  -> XREF file=0x37707 RVA=0x38107 pre=4c8d05
+  -> XREF file=0x37BC7 RVA=0x385C7 pre=4c8d05
+  -> XREF file=0x38087 RVA=0x38A87 pre=4c8d05
+  -> XREF file=0x38547 RVA=0x38F47 pre=4c8d05
+  -> XREF file=0x38A07 RVA=0x39407 pre=4c8d05
+  -> XREF file=0x38EC7 RVA=0x398C7 pre=4c8d05
+
+=== SAUTS DANS HOOK EVALUATE (0x376C0 - 0x38000) ===
+0x0376CC: Jcc short -> 0x0376D6 (7508)
+0x0376E0: Jcc near  -> 0x037805 (0f851f010000)
+0x03774F: Jcc short -> 0x03776F (751e)
+0x037754: Jcc short -> 0x037748 (74f2)
+0x03777B: Jcc short -> 0x037783 (7206)
+0x0377CB: Jcc short -> 0x037805 (7238)
+0x0377DC: Jcc short -> 0x0377FD (721f)
+0x0377ED: Jcc near  -> 0x03797B (0f8388010000)
+0x03781B: Jcc short -> 0x037880 (7463)
+0x037828: Jcc short -> 0x037880 (7556)
+0x03783B: Jcc near  -> 0x03792B (0f85ea000000)
+0x03784A: Jcc short -> 0x03785B (7f0f)
+0x03784D: JMP near  -> 0x48037852 (e900000048)
+0x037866: JMP near  -> 0x-7BB78794 (e901004584)
+0x03786F: Jcc short -> 0x037880 (740f)
+0x03789F: Jcc short -> 0x037910 (746f)
+0x0378AE: Jcc short -> 0x037910 (7560)
+0x0378BA: Jcc short -> 0x037910 (7454)
+0x0378BF: Jcc short -> 0x037910 (744f)
+0x0378C4: Jcc short -> 0x037910 (744a)
+0x0378D7: Jcc short -> 0x037953 (757a)
+0x0378E2: Jcc short -> 0x037958 (7f74)
+0x0378E4: Jcc short -> 0x03792E (7d48)
+0x0378F0: Jcc short -> 0x037901 (740f)
+0x03790A: JMP near  -> 0x-76B886F0 (e901004489)
+0x037943: Jcc short -> 0x03790B (7fc6)
+0x03794E: Jcc short -> 0x037914 (7ec4)
+0x03796B: Jcc short -> 0x037933 (7fc6)
+0x03799F: Jcc short -> 0x03794C (75ab)
+0x037ADD: Jcc short -> 0x037AEE (7d0f)
+0x037AE0: Jcc short -> 0x037AE9 (7507)
+0x037AE5: Jcc short -> 0x037AC7 (73e0)
+0x037B2F: Jcc short -> 0x037B19 (75e8)
+0x037B3C: Jcc short -> 0x037B57 (7519)
+0x037B4E: Jcc short -> 0x037B6D (741d)
+0x037B68: JMP near  -> 0x037DD7 (e96a020000)
+0x037B8C: Jcc short -> 0x037B96 (7508)
+0x037BA0: Jcc near  -> 0x037CC5 (0f851f010000)
+0x037C0F: Jcc short -> 0x037C2F (751e)
+0x037C3B: Jcc short -> 0x037C43 (7206)
+0x037C8B: Jcc short -> 0x037CC5 (7238)
+0x037C9C: Jcc short -> 0x037CBD (721f)
+0x037CAD: Jcc near  -> 0x037E3B (0f8388010000)
+0x037CDB: Jcc short -> 0x037D40 (7463)
+0x037CE8: Jcc short -> 0x037D40 (7556)
+0x037CFB: Jcc near  -> 0x037DEB (0f85ea000000)
+0x037D0A: Jcc short -> 0x037D1B (7f0f)
+0x037D0D: JMP near  -> 0x48037D12 (e900000048)
+0x037D15: Jcc short -> 0x037CF9 (77e2)
+0x037D2F: Jcc short -> 0x037D40 (740f)
+0x037D5F: Jcc short -> 0x037DD0 (746f)
+0x037D6E: Jcc short -> 0x037DD0 (7560)
+0x037D7A: Jcc short -> 0x037DD0 (7454)
+0x037D7F: Jcc short -> 0x037DD0 (744f)
+0x037D84: Jcc short -> 0x037DD0 (744a)
+0x037D97: Jcc short -> 0x037E13 (757a)
+0x037DA2: Jcc short -> 0x037E18 (7f74)
+0x037DA4: Jcc short -> 0x037DEE (7d48)
+0x037DB0: Jcc short -> 0x037DC1 (740f)
+0x037E03: Jcc short -> 0x037DCB (7fc6)
+0x037E2B: Jcc short -> 0x037DF3 (7fc6)
+0x037E9F: Jcc short -> 0x037E47 (75a6)
+0x037F9D: Jcc short -> 0x037FAE (7d0f)
+0x037FA0: Jcc short -> 0x037FA9 (7507)
+0x037FFC: Jcc short -> 0x038017 (7519)
+
+=== SAUTS DANS INJECTION FEATURE 18 (0x09F00 - 0x0A500) ===
+0x009F48: Jcc short -> 0x009F61 (7417)
+0x009F5D: Jcc short -> 0x009FD8 (7f79)
+0x009F72: Jcc short -> 0x009F78 (7804)
+0x00A0D3: Jcc short -> 0x00A12B (7456)
+0x00A1C7: Jcc short -> 0x00A1C9 (7800)
+0x00A1D3: Jcc short -> 0x00A1ED (7018)
+0x00A21D: Jcc short -> 0x00A228 (7409)
+0x00A257: Jcc short -> 0x00A259 (7e00)
+0x00A287: Jcc short -> 0x00A271 (78e8)
+0x00A2CD: Jcc short -> 0x00A2B7 (78e8)
+0x00A312: Jcc short -> 0x00A2FC (78e8)
+0x00A3AB: Jcc short -> 0x00A3B2 (7005)
+0x00A3B1: Jcc short -> 0x00A3B4 (7e01)
+0x00A4F4: Jcc short -> 0x00A53E (7848)
+0x00A4FE: Jcc short -> 0x00A524 (7424)

@@ -33,3 +33,11 @@ Desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# Copies locales: binaires LukeRoss propriétaires, clones d'autres projets et
+# scripts de config personnels. Jamais commités.
+RealRepo/
+DLSS5oneclick/
+optiscaler-dlssnr/
+RealConfig.bat
+RealRepo.7z
