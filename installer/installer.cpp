@@ -388,6 +388,77 @@ std::wstring GetCacheDirectory()
     return L".";
 }
 
+bool CopyDirectoryRecursiveW(const std::wstring& srcDir, const std::wstring& dstDir)
+{
+    CreateDirectoryW(dstDir.c_str(), NULL);
+    std::wstring searchPath = srcDir + L"\\*.*";
+    WIN32_FIND_DATAW ffd;
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) return false;
+
+    do {
+        if (wcscmp(ffd.cFileName, L".") == 0 || wcscmp(ffd.cFileName, L"..") == 0)
+            continue;
+
+        std::wstring srcItem = srcDir + L"\\" + ffd.cFileName;
+        std::wstring dstItem = dstDir + L"\\" + ffd.cFileName;
+
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            CopyDirectoryRecursiveW(srcItem, dstItem);
+        } else {
+            CopyFileW(srcItem.c_str(), dstItem.c_str(), FALSE);
+        }
+    } while (FindNextFileW(hFind, &ffd));
+
+    FindClose(hFind);
+    return true;
+}
+
+bool DeleteDirectoryRecursiveW(const std::wstring& path)
+{
+    std::wstring searchPath = path + L"\\*.*";
+    WIN32_FIND_DATAW ffd;
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) return RemoveDirectoryW(path.c_str()) != FALSE;
+
+    do {
+        if (wcscmp(ffd.cFileName, L".") == 0 || wcscmp(ffd.cFileName, L"..") == 0)
+            continue;
+
+        std::wstring item = path + L"\\" + ffd.cFileName;
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            DeleteDirectoryRecursiveW(item);
+        } else {
+            DeleteFileW(item.c_str());
+        }
+    } while (FindNextFileW(hFind, &ffd));
+
+    FindClose(hFind);
+    return RemoveDirectoryW(path.c_str()) != FALSE;
+}
+
+std::wstring FindOptiScalerBackendDir()
+{
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    PathRemoveFileSpecW(exePath);
+
+    std::vector<std::wstring> bases = {
+        std::wstring(exePath) + L"\\OptiScaler",
+        std::wstring(exePath) + L"\\..\\OptiScaler",
+        std::wstring(exePath) + L"\\deps\\OptiScaler",
+        std::wstring(exePath) + L"\\..\\deps\\OptiScaler",
+        GetCacheDirectory() + L"\\OptiScaler"
+    };
+
+    for (const auto& b : bases) {
+        if (PathFileExistsW(b.c_str()) && PathIsDirectoryW(b.c_str())) {
+            return b;
+        }
+    }
+    return L"";
+}
+
 std::wstring FindOrDownloadComponent(const std::wstring& fileName)
 {
     wchar_t exePath[MAX_PATH];
@@ -431,20 +502,20 @@ std::wstring FindOrDownloadComponent(const std::wstring& fileName)
         }
     }
 
-    // Auto-download renodx-dlss5.addon64 if missing
-    if (fileName == L"renodx-dlss5.addon64") {
-        wchar_t cachedAddon[MAX_PATH];
-        PathCombineW(cachedAddon, cacheDir.c_str(), L"renodx-dlss5.addon64");
-        if (PathFileExistsW(cachedAddon)) return std::wstring(cachedAddon);
+    // Auto-download OptiScaler Pre-SR package (OptiScaler.dll, nvngx.dll_dlssnr.dll, OptiScaler/ backend) if missing
+    if (fileName == L"OptiScaler.dll" || fileName == L"nvngx.dll_dlssnr.dll" || fileName == L"OptiScaler.ini") {
+        wchar_t cachedOpti[MAX_PATH];
+        PathCombineW(cachedOpti, cacheDir.c_str(), fileName.c_str());
+        if (PathFileExistsW(cachedOpti)) return std::wstring(cachedOpti);
 
         wchar_t zipDest[MAX_PATH];
-        PathCombineW(zipDest, cacheDir.c_str(), L"renodx-dlss5_4.70.zip");
+        PathCombineW(zipDest, cacheDir.c_str(), L"OptiScaler-DLSSNR-v0.7.6.zip");
 
-        std::wstring url = L"https://github.com/RankFTW/rhi-repo/releases/download/renodx-dlss5-4.70/renodx-dlss5_4.70.zip";
-        if (DownloadHttpFile(url, zipDest, L"RenoDX DLSS 5 Add-on")) {
+        std::wstring url = L"https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/download/v0.7.6-dlssnr/OptiScaler-DLSSNR-v0.7.6.zip";
+        if (DownloadHttpFile(url, zipDest, L"OptiScaler Pre-SR Multipass Package (v0.7.6)")) {
             ExtractZip(zipDest, cacheDir);
             DeleteFileW(zipDest);
-            if (PathFileExistsW(cachedAddon)) return std::wstring(cachedAddon);
+            if (PathFileExistsW(cachedOpti)) return std::wstring(cachedOpti);
         }
     }
 
@@ -550,10 +621,24 @@ void InspectTarget()
         statusText += L"LukeRoss Mod : [NOT DETECTED] Please install LukeRoss REAL VR mod first!\r\n";
     }
 
+    bool hasOptiScaler = false;
+    wchar_t optiAsi[MAX_PATH], optiDll[MAX_PATH];
+    PathCombineW(optiAsi, g_targetDir.c_str(), L"OptiScaler.asi");
+    PathCombineW(optiDll, g_targetDir.c_str(), L"OptiScaler.dll");
+    if (PathFileExistsW(optiAsi) || PathFileExistsW(optiDll)) {
+        hasOptiScaler = true;
+    }
+
     if (g_hasDLSS) {
         statusText += L"DLSS Engine  : [OK] " + g_dlssVersionStr + L"\r\n";
     } else {
         statusText += L"DLSS Engine  : [WARNING] No nvngx_dlss.dll found in directory\r\n";
+    }
+
+    if (hasOptiScaler) {
+        statusText += L"OptiScaler   : [OK] Pre-SR Engine detected (OptiScaler.asi/dll)\r\n";
+    } else {
+        statusText += L"OptiScaler   : [READY] Will be deployed on install\r\n";
     }
 
     if (g_isGameRunning) {
@@ -562,10 +647,12 @@ void InspectTarget()
         statusText += L"Process      : [CLOSED] Ready for file operations\r\n";
     }
 
-    if (g_hasOurProxy) {
-        statusText += L"State        : DLSS 5 <> VR is currently INSTALLED and ACTIVE.";
+    if (g_hasOurProxy && hasOptiScaler) {
+        statusText += L"State        : DLSS 5 <> VR (OptiScaler Pre-SR) is currently INSTALLED and ACTIVE.";
+    } else if (g_hasOurProxy) {
+        statusText += L"State        : DLSS 5 Proxy active (Update recommended to deploy OptiScaler Pre-SR).";
     } else if (g_hasLukeRoss) {
-        statusText += L"State        : Ready to Install DLSS 5 Neural Reconstruction.";
+        statusText += L"State        : Ready to Install DLSS 5 (OptiScaler Pre-SR Multipass).";
     } else {
         statusText += L"State        : RealVR mod missing. Run RealConfig.bat on game first.";
     }
@@ -579,7 +666,7 @@ void InspectTarget()
 void DoInstall()
 {
     AppendLog(L"----------------------------------------------------------------------");
-    AppendLog(L"[START] Starting DLSS 5 <> VR Installation...");
+    AppendLog(L"[START] Starting DLSS 5 <> VR Installation (OptiScaler Pre-SR Engine)...");
 
     if (g_isGameRunning) {
         int res = MessageBoxW(g_hMainWnd,
@@ -628,10 +715,12 @@ void DoInstall()
     std::vector<CopyPair> files = {
         { L"dxgi.dll", L"dxgi.dll", true },
         { L"openvr_api.dll", L"openvr_api.dll", true },
-        { L"ReShade64_dlss5.dll", L"ReShade64_dlss5.dll", true },
-        { L"renodx-dlss5.addon64", L"renodx-dlss5.addon64", true },
+        { L"OptiScaler.dll", L"OptiScaler.asi", true },              // LukeRoss native stéréoscopic hook target
+        { L"OptiScaler.dll", L"OptiScaler.dll", true },              // Direct DLL reference
+        { L"nvngx.dll_dlssnr.dll", L"nvngx.dll_dlssnr.dll", true },  // Signature forwarder
+        { L"OptiScaler.ini", L"OptiScaler.ini", false },             // Base configuration
         { L"cudart64_12.dll", L"cudart64_12.dll", false },
-        { L"nvngx_dlssnr.dll", L"nvngx_dlssnr.dll", false }
+        { L"nvngx_dlssnr.dll", L"nvngx_dlssnr.dll", false }          // DLSS 5 Neural Model
     };
 
     for (const auto& item : files) {
@@ -657,20 +746,63 @@ void DoInstall()
         }
     }
 
-    // Step 3: Configure ReShade.ini with optimal VR parameters
+    // Step 2b: Copy OptiScaler/ backend folder if present
+    std::wstring backendDir = FindOptiScalerBackendDir();
+    if (!backendDir.empty()) {
+        wchar_t dstBackend[MAX_PATH];
+        PathCombineW(dstBackend, g_targetDir.c_str(), L"OptiScaler");
+        if (CopyDirectoryRecursiveW(backendDir, dstBackend)) {
+            AppendLog(L"[COPY] Successfully deployed OptiScaler/ backend shaders & modules");
+        } else {
+            AppendLog(L"[WARN] Could not copy OptiScaler/ backend directory");
+        }
+    }
+
+    // Step 2c: Clean up legacy ReShade / RenoDX files to prevent conflicts
+    std::vector<std::wstring> legacyFiles = {
+        L"ReShade64_dlss5.dll",
+        L"renodx-dlss5.addon64"
+    };
+    for (const auto& lf : legacyFiles) {
+        wchar_t lp[MAX_PATH];
+        PathCombineW(lp, g_targetDir.c_str(), lf.c_str());
+        if (PathFileExistsW(lp)) {
+            DeleteFileW(lp);
+            AppendLog(L"[CLEAN] Removed legacy component: " + lf);
+        }
+    }
+
+    // Step 3: Configure OptiScaler.ini with optimal VR Pre-SR parameters
     wchar_t iniPath[MAX_PATH];
-    PathCombineW(iniPath, g_targetDir.c_str(), L"ReShade.ini");
-    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NeuralUplift", L"1", iniPath);
-    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"EnableHooks", L"1", iniPath);       // Standard hooks (EnableHooks=2 causes visual corruption)
-    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NRPreset", L"2", iniPath);          // Preset 2: Performance
-    WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NRStyle", L"0", iniPath);           // Neutral style (prevents filmic tone collision)
-    AppendLog(L"[CONFIG] Configured ReShade.ini: [RenoDX.DLSS5] NeuralUplift=1, EnableHooks=1, NRPreset=2, NRStyle=0");
+    PathCombineW(iniPath, g_targetDir.c_str(), L"OptiScaler.ini");
+
+    WritePrivateProfileStringW(L"DlssNr", L"Enabled", L"true", iniPath);
+    WritePrivateProfileStringW(L"DlssNr", L"RunBeforeSR", L"true", iniPath);         // Critical Pre-SR mode (4x smaller work area)
+    WritePrivateProfileStringW(L"DlssNr", L"WorkingScale", L"0.75", iniPath);        // 72 FPS solid on RTX 5090 / 4090
+    WritePrivateProfileStringW(L"DlssNr", L"Passes", L"1", iniPath);
+    WritePrivateProfileStringW(L"DlssNr", L"ResidualAcrossRR", L"true", iniPath);    // RT Overdrive Ray Recon support
+    WritePrivateProfileStringW(L"DlssNr", L"ResidualAcrossRRBlend", L"0.08", iniPath);
+    WritePrivateProfileStringW(L"DlssNr", L"DeferredDLSS", L"false", iniPath);
+    WritePrivateProfileStringW(L"DlssNr", L"ResidualFG", L"false", iniPath);
+    WritePrivateProfileStringW(L"DlssNr", L"AutoCapture", L"false", iniPath);
+    WritePrivateProfileStringW(L"DlssNr", L"DebugView", L"0", iniPath);
+    WritePrivateProfileStringW(L"DlssNr", L"Preset", L"2", iniPath);                 // Preset 2: Performance
+    WritePrivateProfileStringW(L"DlssNr", L"Intensity", L"1.0", iniPath);
+    WritePrivateProfileStringW(L"DlssNr", L"AutoMask", L"true", iniPath);
+
+    // VR HUD configuration
+    WritePrivateProfileStringW(L"VRHUD", L"HUDScale", L"1", iniPath);
+    WritePrivateProfileStringW(L"VRHUD", L"HUDPosition", L"0", iniPath);
+    WritePrivateProfileStringW(L"VRHUD", L"FrameGuard", L"1", iniPath);
+    WritePrivateProfileStringW(L"VRHUD", L"PriorityBoost", L"1", iniPath);
+
+    AppendLog(L"[CONFIG] Configured OptiScaler.ini: [DlssNr] RunBeforeSR=true, WorkingScale=0.75, Preset=2, ResidualAcrossRR=true");
 
     AppendLog(L"[SUCCESS] Installation finished successfully!");
     AppendLog(L"----------------------------------------------------------------------");
 
     InspectTarget();
-    MessageBoxW(g_hMainWnd, L"DLSS 5 <> VR installed successfully!\nYou can now launch the game in VR.", L"Success", MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(g_hMainWnd, L"DLSS 5 <> VR (OptiScaler Pre-SR) installed successfully!\nYou can now launch the game in VR.", L"Success", MB_OK | MB_ICONINFORMATION);
 }
 
 void DoRestore()
@@ -705,6 +837,10 @@ void DoRestore()
     }
 
     std::vector<std::wstring> toRemove = {
+        L"OptiScaler.asi",
+        L"OptiScaler.dll",
+        L"nvngx.dll_dlssnr.dll",
+        L"OptiScaler.ini",
         L"ReShade64_dlss5.dll",
         L"renodx-dlss5.addon64",
         L"vr_dlss5_proxy.log"
@@ -717,6 +853,13 @@ void DoRestore()
             DeleteFileW(p);
             AppendLog(L"[CLEAN] Removed: " + f);
         }
+    }
+
+    wchar_t backendDir[MAX_PATH];
+    PathCombineW(backendDir, g_targetDir.c_str(), L"OptiScaler");
+    if (PathFileExistsW(backendDir)) {
+        DeleteDirectoryRecursiveW(backendDir);
+        AppendLog(L"[CLEAN] Removed OptiScaler/ backend folder");
     }
 
     AppendLog(L"[SUCCESS] Vanilla LukeRoss REAL VR restored successfully!");

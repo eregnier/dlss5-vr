@@ -41,9 +41,11 @@ echo [3/3] Assembling standalone distribution package...
 copy /y "installer\VR-DLSS5-Installer.exe" "%DIST_DIR%\" >nul
 copy /y "proxy\dxgi.dll" "%DIST_DIR%\proxy\" >nul
 copy /y "proxy\openvr_api.dll" "%DIST_DIR%\proxy\" >nul
-copy /y "deps\ReShade64_dlss5.dll" "%DIST_DIR%\deps\" >nul
-copy /y "deps\renodx-dlss5.addon64" "%DIST_DIR%\deps\" >nul
+copy /y "deps\OptiScaler.dll" "%DIST_DIR%\deps\" >nul
+copy /y "deps\nvngx.dll_dlssnr.dll" "%DIST_DIR%\deps\" >nul
+copy /y "deps\OptiScaler.ini" "%DIST_DIR%\deps\" >nul
 copy /y "deps\cudart64_12.dll" "%DIST_DIR%\deps\" >nul
+if exist "deps\OptiScaler" xcopy /e /i /y "deps\OptiScaler" "%DIST_DIR%\deps\OptiScaler\" >nul
 copy /y "LICENSE" "%DIST_DIR%\" >nul
 copy /y "README.md" "%DIST_DIR%\" >nul
 

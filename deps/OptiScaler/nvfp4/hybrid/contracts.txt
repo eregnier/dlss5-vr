@@ -1,0 +1,3 @@
+tokens 960 contract/manifest.txt
+tokens 2160 contract_m2160/manifest.txt
+tokens 3840 contract_m3840/manifest.txt

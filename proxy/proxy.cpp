@@ -35,7 +35,7 @@ static unsigned long long g_evalFrameCounter = 0;
 extern "C" int WINAPI Proxy_NVSDK_NGX_D3D12_EvaluateFeature(void* pCmdList, void* pHandle, void* pParameters, void* pCallback);
 
 static HMODULE g_hRealVR = NULL;
-static HMODULE g_hReShade = NULL;
+static HMODULE g_hOptiScaler = NULL;
 static HMODULE g_hSysDxgi = NULL;
 
 static PFN_CreateDXGIFactory g_pfnCreateDXGIFactory = NULL;
@@ -238,17 +238,19 @@ static void InitProxy()
     if (initialized) return;
     initialized = TRUE;
 
-    LogMsg("[Proxy] Initializing VR-DLSS5 Dual Proxy...");
+    LogMsg("[Proxy] Initializing VR-DLSS5 Dual Proxy (OptiScaler Pre-SR Engine)...");
 
-    // 1. Charger ReShade 6.8 (DLSS 5 host) d'abord pour installer les hooks NGX proprement
-    g_hReShade = LoadLibraryA("ReShade64_dlss5.dll");
-    if (g_hReShade)
+    // 1. Charger OptiScaler Pre-SR Engine (OptiScaler.asi / OptiScaler.dll / dbghelp.dll)
+    g_hOptiScaler = LoadLibraryA("OptiScaler.asi");
+    if (!g_hOptiScaler) g_hOptiScaler = LoadLibraryA("OptiScaler.dll");
+    if (!g_hOptiScaler) g_hOptiScaler = LoadLibraryA("dbghelp.dll");
+    if (g_hOptiScaler)
     {
-        LogMsg("[Proxy] Successfully loaded ReShade64_dlss5.dll (NGX hooks armed)");
+        LogMsg("[Proxy] Successfully loaded OptiScaler Pre-SR Engine");
     }
     else
     {
-        LogMsg("[Proxy] WARNING: Could not load ReShade64_dlss5.dll");
+        LogMsg("[Proxy] OptiScaler not loaded directly (will be loaded by RealVR64 as OptiScaler.asi if present)");
     }
 
     // 2. Charger RealVR64.dll (LukeRoss VR mod) ensuite
@@ -430,25 +432,44 @@ static inline HUDColor MakeHUDColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a =
     HUDColor c; c.r = r; c.g = g; c.b = b; c.a = a; return c;
 }
 
-// Runtime memory offsets inside renodx-dlss5.addon64
-static uintptr_t g_renodxBase = 0;
+// Runtime state for OptiScaler Pre-SR Engine
 static bool g_varsInitialized = false;
 
-// HUD State
+// HUD State & OptiScaler Pre-SR settings
 static bool g_hudDirty = true;
-static bool g_masterEnable = true;
-static float g_nrIntensity = 2.50f;
-static float g_nrGlobalTone = 1.00f;
-static int g_nrPreset = 2; // Default: Preset 2 [Performance] for high-FPS VR
-static int g_hudScale = 0; // 0: 1.0x (Compact / Pimax Fin), 1: 1.5x (Equilibre), 2: 2.0x (Confort)
-static int g_activeRow = 0; // 0 to 5
-static int g_hudPosIndex = 0; // 0: Bas-Centre, 1: Haut-Centre, 2: Haut-Droite, 3: Haut-Gauche
+static bool g_masterEnable = true;          // [DlssNr] Enabled
+static float g_workingScale = 0.75f;        // [DlssNr] WorkingScale (0.50x, 0.66x, 0.75x, 1.00x)
+static bool g_runBeforeSR = true;           // [DlssNr] RunBeforeSR (Pre-SR vs Post-SR)
+static int g_nrPreset = 2;                  // [DlssNr] Preset (0, 1, 2)
+static bool g_residualAcrossRR = true;      // [DlssNr] ResidualAcrossRR (true/false)
+static float g_nrIntensity = 1.00f;         // [DlssNr] Intensity
+static int g_hudScale = 1;                  // [VRHUD] HUDScale (0: 1.0x Compact, 1: 1.5x Balanced, 2: 2.0x Comfort)
+static int g_activeRow = 0;                 // 0 to 5
+static int g_hudPosIndex = 0;               // [VRHUD] HUDPosition (0: Bottom-Center, 1: Top-Center, 2: Top-Right, 3: Top-Left)
 static int g_liveHz = 72;
+static bool g_frameGuardActive = true;      // [VRHUD] FrameGuard (auto drop scale on VR cliff)
+static bool g_frameGuardTriggered = false;
+
+// ----------------------------------------------------------------------------
+// Deferred process priority boost.
+// Applied from the autonomous watcher thread after the app has settled.
+// ----------------------------------------------------------------------------
+static bool g_priorityBoosted = false;
+static bool g_priorityBoostEnabled = true;
+
+// ----------------------------------------------------------------------------
+// High-resolution frame-time diagnostics (reprojection-cliff analysis).
+// Sampled every 200 ms from the NGX evaluate counter (per-eye evaluates in
+// stereo VR), giving a distribution of ms/evaluate to characterise how far the
+// pipeline sits from the 72/90/120 Hz V-Sync budget.
+// ----------------------------------------------------------------------------
+static double g_ftMinMs = 1e9, g_ftMaxMs = 0.0, g_ftSumMs = 0.0;
+static unsigned int g_ftSamples = 0;
 
 // 500 ms Debounce State
 static bool g_hasPendingSave = false;
 static uint64_t g_lastChangeTick = 0;
-static char g_iniPath[MAX_PATH] = ".\\ReShade.ini";
+static char g_iniPath[MAX_PATH] = ".\\OptiScaler.ini";
 
 // Key & Gamepad repetition
 struct KeyTracker {
@@ -472,8 +493,26 @@ static void InitPaths()
         if (lastSlash)
         {
             *(lastSlash + 1) = '\0';
-            strcat_s(exePath, MAX_PATH, "ReShade.ini");
-            strcpy_s(g_iniPath, MAX_PATH, exePath);
+            char optiIni[MAX_PATH];
+            strcpy_s(optiIni, MAX_PATH, exePath);
+            strcat_s(optiIni, MAX_PATH, "OptiScaler.ini");
+
+            char reshadeIni[MAX_PATH];
+            strcpy_s(reshadeIni, MAX_PATH, exePath);
+            strcat_s(reshadeIni, MAX_PATH, "ReShade.ini");
+
+            if (GetFileAttributesA(optiIni) != INVALID_FILE_ATTRIBUTES)
+            {
+                strcpy_s(g_iniPath, MAX_PATH, optiIni);
+            }
+            else if (GetFileAttributesA(reshadeIni) != INVALID_FILE_ATTRIBUTES)
+            {
+                strcpy_s(g_iniPath, MAX_PATH, reshadeIni);
+            }
+            else
+            {
+                strcpy_s(g_iniPath, MAX_PATH, optiIni);
+            }
         }
     }
 }
@@ -481,78 +520,122 @@ static void InitPaths()
 static void InitVariablesFromAddonOrIni()
 {
     if (g_varsInitialized) return;
+    g_varsInitialized = true;
 
     InitPaths();
 
-    // 1. Read deterministic initial values directly from ReShade.ini
-    int uplift = GetPrivateProfileIntA("RenoDX.DLSS5", "NeuralUplift", 1, g_iniPath);
-    g_masterEnable = (uplift != 0);
+    bool isOptiScaler = (strstr(g_iniPath, "OptiScaler.ini") != NULL);
 
-    char intStr[32] = {0};
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRIntensity", "2.00", intStr, sizeof(intStr), g_iniPath);
-    g_nrIntensity = (float)atof(intStr);
-    if (g_nrIntensity <= 0.01f || g_nrIntensity > 10.0f) g_nrIntensity = 2.00f;
-
-    char toneStr[32] = {0};
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRGlobalTone", "1.00", toneStr, sizeof(toneStr), g_iniPath);
-    g_nrGlobalTone = (float)atof(toneStr);
-    if (g_nrGlobalTone <= 0.01f || g_nrGlobalTone > 5.0f) g_nrGlobalTone = 1.00f;
-
-    g_nrPreset = GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 2, g_iniPath);
-    if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 2;
-
-    g_hudScale = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDScale", 1, g_iniPath);
-    if (g_hudScale < 0 || g_hudScale > 2) g_hudScale = 1;
-
-    g_hudPosIndex = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDPosition", 0, g_iniPath);
-    if (g_hudPosIndex < 0 || g_hudPosIndex > 3) g_hudPosIndex = 0;
-
-    // 2. Locate renodx-dlss5.addon64 if loaded and push values into RAM
-    if (!g_renodxBase)
+    if (isOptiScaler)
     {
-        g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
+        char enabledStr[32] = {0};
+        GetPrivateProfileStringA("DlssNr", "Enabled", "true", enabledStr, sizeof(enabledStr), g_iniPath);
+        g_masterEnable = (_stricmp(enabledStr, "true") == 0 || _stricmp(enabledStr, "1") == 0);
+
+        char scaleStr[32] = {0};
+        GetPrivateProfileStringA("DlssNr", "WorkingScale", "0.75", scaleStr, sizeof(scaleStr), g_iniPath);
+        g_workingScale = (float)atof(scaleStr);
+        if (g_workingScale < 0.25f || g_workingScale > 2.0f) g_workingScale = 0.75f;
+
+        char preSrStr[32] = {0};
+        GetPrivateProfileStringA("DlssNr", "RunBeforeSR", "true", preSrStr, sizeof(preSrStr), g_iniPath);
+        g_runBeforeSR = (_stricmp(preSrStr, "true") == 0 || _stricmp(preSrStr, "1") == 0);
+
+        g_nrPreset = GetPrivateProfileIntA("DlssNr", "Preset", 2, g_iniPath);
+        if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 2;
+
+        char rrStr[32] = {0};
+        GetPrivateProfileStringA("DlssNr", "ResidualAcrossRR", "true", rrStr, sizeof(rrStr), g_iniPath);
+        g_residualAcrossRR = (_stricmp(rrStr, "true") == 0 || _stricmp(rrStr, "1") == 0);
+
+        char intStr[32] = {0};
+        GetPrivateProfileStringA("DlssNr", "Intensity", "1.00", intStr, sizeof(intStr), g_iniPath);
+        g_nrIntensity = (float)atof(intStr);
+        if (g_nrIntensity <= 0.01f || g_nrIntensity > 10.0f) g_nrIntensity = 1.00f;
+
+        g_hudScale = GetPrivateProfileIntA("VRHUD", "HUDScale", 1, g_iniPath);
+        if (g_hudScale < 0 || g_hudScale > 2) g_hudScale = 1;
+
+        g_hudPosIndex = GetPrivateProfileIntA("VRHUD", "HUDPosition", 0, g_iniPath);
+        if (g_hudPosIndex < 0 || g_hudPosIndex > 3) g_hudPosIndex = 0;
+
+        g_frameGuardActive = GetPrivateProfileIntA("VRHUD", "FrameGuard", 1, g_iniPath) != 0;
+        g_priorityBoostEnabled = GetPrivateProfileIntA("VRHUD", "PriorityBoost", 1, g_iniPath) != 0;
+    }
+    else
+    {
+        // Legacy ReShade fallback
+        int uplift = GetPrivateProfileIntA("RenoDX.DLSS5", "NeuralUplift", 1, g_iniPath);
+        g_masterEnable = (uplift != 0);
+        g_workingScale = 0.75f;
+        g_runBeforeSR = true;
+        g_residualAcrossRR = true;
+        g_nrPreset = GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 2, g_iniPath);
+        if (g_nrPreset < 0 || g_nrPreset > 2) g_nrPreset = 2;
+        g_hudScale = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDScale", 1, g_iniPath);
+        if (g_hudScale < 0 || g_hudScale > 2) g_hudScale = 1;
+        g_hudPosIndex = GetPrivateProfileIntA("RenoDX.DLSS5", "HUDPosition", 0, g_iniPath);
+        if (g_hudPosIndex < 0 || g_hudPosIndex > 3) g_hudPosIndex = 0;
     }
 
-    if (g_renodxBase)
-    {
-        // Push initial state to addon RAM
-        *(uint8_t*)(g_renodxBase + 0x192F68) = g_masterEnable ? 1 : 0;
-        *(float*)(g_renodxBase + 0x19364C) = g_masterEnable ? g_nrIntensity : 0.0f;
-        *(float*)(g_renodxBase + 0x193650) = g_nrGlobalTone;
-        *(int32_t*)(g_renodxBase + 0x196B98) = g_nrPreset;
-        *(int32_t*)(g_renodxBase + 0x196C2C) = 0; // Neutral style
-        *(uint8_t*)(g_renodxBase + 0x1935E8) = 1; // trigger RenoDX parameter sync
-
-        g_varsInitialized = true;
-        char buf[256];
-        sprintf_s(buf, sizeof(buf), 
-            "[VR-DLSS5-HUD] Initialized: Enable=%d, Intensity=%.2f, Tone=%.2f, Preset=%d (Performance), Scale=%d, Pos=%d",
-            g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_hudPosIndex);
-        LogMsg(buf);
-    }
+    char buf[256];
+    sprintf_s(buf, sizeof(buf), 
+        "[VR-DLSS5-HUD] Initialized from %s: Enable=%d, WorkingScale=%.2f, RunBeforeSR=%d, Preset=%d, ResidualRR=%d, Scale=%d, Pos=%d",
+        g_iniPath, g_masterEnable ? 1 : 0, g_workingScale, g_runBeforeSR ? 1 : 0, g_nrPreset, g_residualAcrossRR ? 1 : 0,
+        g_hudScale, g_hudPosIndex);
+    LogMsg(buf);
 }
 
 static void CommitSettingsToDisk()
 {
-    // High-performance single-pass section serialization (replaces 6 separate file opens/parses)
-    char secBuf[512];
-    int offset = 0;
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NeuralUplift=%d", g_masterEnable ? 1 : 0) + 1;
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "EnableHooks=1") + 1; // Standard hooks
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRIntensity=%.2f", g_nrIntensity) + 1; // Preserve chosen intensity!
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRGlobalTone=%.2f", g_nrGlobalTone) + 1;
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRPreset=%d", g_nrPreset) + 1;
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRStyle=0") + 1; // Neutral style
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDScale=%d", g_hudScale) + 1;
-    offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDPosition=%d", g_hudPosIndex) + 1;
-    secBuf[offset] = '\0'; // Double null terminator for WritePrivateProfileSectionA
+    InitPaths();
 
-    WritePrivateProfileSectionA("RenoDX.DLSS5", secBuf, g_iniPath);
+    bool isOptiScaler = (strstr(g_iniPath, "OptiScaler.ini") != NULL);
+
+    if (isOptiScaler)
+    {
+        WritePrivateProfileStringA("DlssNr", "Enabled", g_masterEnable ? "true" : "false", g_iniPath);
+
+        char scaleBuf[32];
+        sprintf_s(scaleBuf, sizeof(scaleBuf), "%.2f", g_workingScale);
+        WritePrivateProfileStringA("DlssNr", "WorkingScale", scaleBuf, g_iniPath);
+
+        WritePrivateProfileStringA("DlssNr", "RunBeforeSR", g_runBeforeSR ? "true" : "false", g_iniPath);
+
+        char presetBuf[32];
+        sprintf_s(presetBuf, sizeof(presetBuf), "%d", g_nrPreset);
+        WritePrivateProfileStringA("DlssNr", "Preset", presetBuf, g_iniPath);
+
+        WritePrivateProfileStringA("DlssNr", "ResidualAcrossRR", g_residualAcrossRR ? "true" : "false", g_iniPath);
+
+        char intBuf[32];
+        sprintf_s(intBuf, sizeof(intBuf), "%.2f", g_nrIntensity);
+        WritePrivateProfileStringA("DlssNr", "Intensity", intBuf, g_iniPath);
+
+        char hudScaleBuf[32], hudPosBuf[32], guardBuf[32];
+        sprintf_s(hudScaleBuf, sizeof(hudScaleBuf), "%d", g_hudScale);
+        sprintf_s(hudPosBuf, sizeof(hudPosBuf), "%d", g_hudPosIndex);
+        sprintf_s(guardBuf, sizeof(guardBuf), "%d", g_frameGuardActive ? 1 : 0);
+        WritePrivateProfileStringA("VRHUD", "HUDScale", hudScaleBuf, g_iniPath);
+        WritePrivateProfileStringA("VRHUD", "HUDPosition", hudPosBuf, g_iniPath);
+        WritePrivateProfileStringA("VRHUD", "FrameGuard", guardBuf, g_iniPath);
+    }
+    else
+    {
+        char secBuf[512];
+        int offset = 0;
+        offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NeuralUplift=%d", g_masterEnable ? 1 : 0) + 1;
+        offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "NRPreset=%d", g_nrPreset) + 1;
+        offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDScale=%d", g_hudScale) + 1;
+        offset += sprintf_s(secBuf + offset, sizeof(secBuf) - offset, "HUDPosition=%d", g_hudPosIndex) + 1;
+        secBuf[offset] = '\0';
+        WritePrivateProfileSectionA("RenoDX.DLSS5", secBuf, g_iniPath);
+    }
 
     char logBuf[256];
     sprintf_s(logBuf, sizeof(logBuf), 
-        "[VR-DLSS5-HUD] 500ms Debounce Save committed (single-pass): Enable=%d, Int=%.2f, Tone=%.2f, Preset=%d, Scale=%d -> %s",
-        g_masterEnable ? 1 : 0, g_nrIntensity, g_nrGlobalTone, g_nrPreset, g_hudScale, g_iniPath);
+        "[VR-DLSS5-HUD] Settings committed to %s: Enable=%d, WorkingScale=%.2f, PreSR=%d, Preset=%d, ResidualRR=%d",
+        g_iniPath, g_masterEnable ? 1 : 0, g_workingScale, g_runBeforeSR ? 1 : 0, g_nrPreset, g_residualAcrossRR ? 1 : 0);
     LogMsg(logBuf);
 }
 
@@ -584,8 +667,8 @@ static void InitGDIRasterizer()
     ReleaseDC(NULL, hdcScreen);
 }
 
-static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, float intensity, float tone, 
-                            int preset, int posIdx, int scaleMode, int activeRow, int liveHz)
+static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, float workingScale, bool runBeforeSR, 
+                            int preset, bool residualAcrossRR, int posIdx, int scaleMode, int activeRow, int liveHz, bool frameGuardTriggered)
 {
     if (!hdc || !pGdiBits) return;
 
@@ -621,7 +704,7 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
     // 4. Header Bar: Title
     SelectObject(hdc, hFontTitle);
     SetTextColor(hdc, RGB(0, 220, 255));
-    TextOutA(hdc, 16, 8, "DLSS 5 <> VR", 12);
+    TextOutA(hdc, 16, 8, "DLSS 5 <> VR (OptiScaler Pre-SR)", 32);
 
     // Solid Glowing Neon Green Dot (Rock-solid, no periodic blinking to prevent VR flicker)
     HBRUSH hBrushDot = CreateSolidBrush(RGB(0, 255, 140));
@@ -703,17 +786,28 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             RECT rc = { 220, y + 2, 310, y + 21 };
             DrawTextA(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        // ROW 1: NR Intensity Slider (0.0 to 5.0)
+        // ROW 1: VR WorkingScale (0.50x, 0.66x, 0.75x, 1.00x)
         else if (i == 1) {
-            TextOutA(hdc, 30, y + 2, "NR Intensity", 12);
+            TextOutA(hdc, 30, y + 2, "VR WorkingScale", 15);
 
-            char valBuf[16];
-            sprintf_s(valBuf, sizeof(valBuf), "%.2f", intensity);
+            const char* scaleDesc = "0.75x [72fps Solid]";
+            float norm = 0.75f;
+            if (workingScale <= 0.55f) { scaleDesc = "0.50x [Ultra-Fast]"; norm = 0.25f; }
+            else if (workingScale <= 0.70f) { scaleDesc = "0.66x [Balanced]"; norm = 0.50f; }
+            else if (workingScale <= 0.85f) { scaleDesc = "0.75x [72fps Solid]"; norm = 0.75f; }
+            else { scaleDesc = "1.00x [Native 4K]"; norm = 1.00f; }
+
             SelectObject(hdc, hFontValue);
             SetTextColor(hdc, isActive ? RGB(0, 240, 255) : RGB(140, 200, 230));
-            TextOutA(hdc, 170, y + 2, valBuf, (int)strlen(valBuf));
+            TextOutA(hdc, 160, y + 2, scaleDesc, (int)strlen(scaleDesc));
 
-            int sx = 220, sy = y + 7, sw = 230, sh = 8;
+            if (frameGuardTriggered) {
+                SelectObject(hdc, hFontBadge);
+                SetTextColor(hdc, RGB(255, 200, 50));
+                TextOutA(hdc, 312, y + 3, "[GUARD]", 7);
+            }
+
+            int sx = 370, sy = y + 7, sw = 85, sh = 8;
             HBRUSH hTrackBg = CreateSolidBrush(RGB(22, 32, 48));
             HPEN hTrackPen = CreatePen(PS_SOLID, 1, RGB(45, 68, 98));
             SelectObject(hdc, hTrackBg);
@@ -722,9 +816,6 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             DeleteObject(hTrackBg);
             DeleteObject(hTrackPen);
 
-            float norm = intensity / 5.0f;
-            if (norm < 0.0f) norm = 0.0f;
-            if (norm > 1.0f) norm = 1.0f;
             int fillW = (int)(sw * norm);
             if (fillW > 0) {
                 HBRUSH hFill = CreateSolidBrush(RGB(0, 160, 225));
@@ -746,48 +837,25 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             DeleteObject(hThumb);
             DeleteObject(hThumbPen);
         }
-        // ROW 2: Sharpness / Tone Slider (0.0 to 2.0)
+        // ROW 2: Placement Mode (Pre-SR vs Post-SR)
         else if (i == 2) {
-            TextOutA(hdc, 30, y + 2, "Sharpness / Tone", 16);
+            TextOutA(hdc, 30, y + 2, "Placement Mode", 14);
 
-            char valBuf[16];
-            sprintf_s(valBuf, sizeof(valBuf), "%.2f", tone);
-            SelectObject(hdc, hFontValue);
-            SetTextColor(hdc, isActive ? RGB(0, 255, 200) : RGB(130, 220, 190));
-            TextOutA(hdc, 170, y + 2, valBuf, (int)strlen(valBuf));
+            SelectObject(hdc, hFontBadge);
+            const char* txt = runBeforeSR ? "Pre-SR [Render Res - Fast]" : "Post-SR [Output 4K - Heavy]";
+            COLORREF cBg = runBeforeSR ? RGB(12, 70, 60) : RGB(120, 40, 20);
+            COLORREF cBd = runBeforeSR ? RGB(40, 220, 180) : RGB(240, 90, 50);
+            HBRUSH hb = CreateSolidBrush(cBg);
+            HPEN hp = CreatePen(PS_SOLID, 1, cBd);
+            SelectObject(hdc, hb);
+            SelectObject(hdc, hp);
+            RoundRect(hdc, 160, y + 2, 455, y + 21, 6, 6);
+            DeleteObject(hb);
+            DeleteObject(hp);
 
-            int sx = 220, sy = y + 7, sw = 230, sh = 8;
-            HBRUSH hTrackBg = CreateSolidBrush(RGB(22, 32, 48));
-            HPEN hTrackPen = CreatePen(PS_SOLID, 1, RGB(45, 68, 98));
-            SelectObject(hdc, hTrackBg);
-            SelectObject(hdc, hTrackPen);
-            RoundRect(hdc, sx, sy, sx + sw, sy + sh, 4, 4);
-            DeleteObject(hTrackBg);
-            DeleteObject(hTrackPen);
-
-            float norm = tone / 2.0f;
-            if (norm < 0.0f) norm = 0.0f;
-            if (norm > 1.0f) norm = 1.0f;
-            int fillW = (int)(sw * norm);
-            if (fillW > 0) {
-                HBRUSH hFill = CreateSolidBrush(RGB(0, 180, 150));
-                HPEN hFillPen = CreatePen(PS_NULL, 0, 0);
-                SelectObject(hdc, hFill);
-                SelectObject(hdc, hFillPen);
-                RoundRect(hdc, sx, sy, sx + fillW, sy + sh, 4, 4);
-                DeleteObject(hFill);
-                DeleteObject(hFillPen);
-            }
-
-            int thumbX = sx + fillW;
-            if (thumbX > sx + sw) thumbX = sx + sw;
-            HBRUSH hThumb = CreateSolidBrush(RGB(50, 255, 200));
-            HPEN hThumbPen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
-            SelectObject(hdc, hThumb);
-            SelectObject(hdc, hThumbPen);
-            RoundRect(hdc, thumbX - 3, sy - 3, thumbX + 3, sy + sh + 3, 4, 4);
-            DeleteObject(hThumb);
-            DeleteObject(hThumbPen);
+            SetTextColor(hdc, RGB(255, 255, 255));
+            RECT rc = { 160, y + 2, 455, y + 21 };
+            DrawTextA(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
         // ROW 3: AI Model Preset (0, 1, 2)
         else if (i == 3) {
@@ -796,38 +864,43 @@ static void RenderModernHUD(HDC hdc, uint32_t* pGdiBits, bool masterEnable, floa
             const char* presetNames[3] = { 
                 "Preset 0  [DLSS-D Neural RR]", 
                 "Preset 1  [Ultra Quality]", 
-                "Preset 2  [Performance]" 
+                "Preset 2  [Performance - VR]" 
             };
             SelectObject(hdc, hFontValue);
             SetTextColor(hdc, isActive ? RGB(255, 240, 120) : RGB(210, 200, 160));
-            TextOutA(hdc, 170, y + 2, presetNames[preset % 3], (int)strlen(presetNames[preset % 3]));
+            TextOutA(hdc, 160, y + 2, presetNames[preset % 3], (int)strlen(presetNames[preset % 3]));
         }
-        // ROW 4: HUD Position (Bottom-Center, Top-Center, Top-Right, Top-Left)
+        // ROW 4: Ray Recon (RR) - ResidualAcrossRR
         else if (i == 4) {
-            TextOutA(hdc, 30, y + 2, "HUD Position", 12);
+            TextOutA(hdc, 30, y + 2, "Ray Recon (RR)", 14);
 
-            const char* posNames[4] = { 
-                "Bottom-Center  (Default VR)", 
-                "Top-Center     (Banner)", 
-                "Top-Right      (Discrete)", 
-                "Top-Left       (Gauge)" 
-            };
-            SelectObject(hdc, hFontValue);
-            SetTextColor(hdc, isActive ? RGB(255, 220, 100) : RGB(210, 200, 150));
-            TextOutA(hdc, 170, y + 2, posNames[posIdx % 4], (int)strlen(posNames[posIdx % 4]));
+            SelectObject(hdc, hFontBadge);
+            const char* rrTxt = residualAcrossRR ? "ResidualAcrossRR [ON - Preserved]" : "ResidualAcrossRR [OFF - Standard]";
+            COLORREF rrBg = residualAcrossRR ? RGB(16, 60, 85) : RGB(50, 50, 55);
+            COLORREF rrBd = residualAcrossRR ? RGB(0, 200, 255) : RGB(100, 100, 110);
+            HBRUSH hrrB = CreateSolidBrush(rrBg);
+            HPEN hrrP = CreatePen(PS_SOLID, 1, rrBd);
+            SelectObject(hdc, hrrB);
+            SelectObject(hdc, hrrP);
+            RoundRect(hdc, 160, y + 2, 455, y + 21, 6, 6);
+            DeleteObject(hrrB);
+            DeleteObject(hrrP);
+
+            SetTextColor(hdc, RGB(255, 255, 255));
+            RECT rcRR = { 160, y + 2, 455, y + 21 };
+            DrawTextA(hdc, rrTxt, -1, &rcRR, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        // ROW 5: VR UI Scale (1.0x, 1.5x, 2.0x)
+        // ROW 5: VR HUD Display (Position & Scale)
         else if (i == 5) {
-            TextOutA(hdc, 30, y + 2, "VR UI Scale", 11);
+            TextOutA(hdc, 30, y + 2, "VR HUD Display", 14);
 
-            const char* scaleNames[3] = { 
-                "1.0x  [Compact / Pimax]", 
-                "1.5x  [Balanced]", 
-                "2.0x  [Comfort]" 
-            };
+            static const char* posNames[4] = { "Bottom-Center", "Top-Center", "Top-Right", "Top-Left" };
+            static const char* scaleNames[3] = { "1.0x (Pimax)", "1.5x (Q3)", "2.0x (Large)" };
+            char dispBuf[64];
+            sprintf_s(dispBuf, sizeof(dispBuf), "Pos: %s  |  Scale: %s", posNames[posIdx % 4], scaleNames[scaleMode % 3]);
             SelectObject(hdc, hFontValue);
             SetTextColor(hdc, isActive ? RGB(255, 220, 100) : RGB(210, 200, 150));
-            TextOutA(hdc, 170, y + 2, scaleNames[scaleMode % 3], (int)strlen(scaleNames[scaleMode % 3]));
+            TextOutA(hdc, 160, y + 2, dispBuf, (int)strlen(dispBuf));
         }
     }
 
@@ -1403,29 +1476,27 @@ static void PollInput()
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 1) { // Intensity Slider (0.0 to 5.0)
-        float step = (isHoldLeft || isHoldRight) ? 0.10f : 0.05f;
+    else if (g_activeRow == 1) { // VR WorkingScale (0.50x, 0.66x, 0.75x, 1.00x)
         if (actLeft) {
-            g_nrIntensity = fmaxf(0.0f, g_nrIntensity - step);
+            if (g_workingScale > 0.85f) g_workingScale = 0.75f;
+            else if (g_workingScale > 0.70f) g_workingScale = 0.66f;
+            else if (g_workingScale > 0.55f) g_workingScale = 0.50f;
             valueChanged = true;
         }
         if (actRight) {
-            g_nrIntensity = fminf(5.0f, g_nrIntensity + step);
+            if (g_workingScale < 0.60f) g_workingScale = 0.66f;
+            else if (g_workingScale < 0.72f) g_workingScale = 0.75f;
+            else if (g_workingScale < 0.90f) g_workingScale = 1.00f;
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 2) { // Sharpness / Tone Slider (0.0 to 2.0)
-        float step = (isHoldLeft || isHoldRight) ? 0.05f : 0.02f;
-        if (actLeft) {
-            g_nrGlobalTone = fmaxf(0.0f, g_nrGlobalTone - step);
-            valueChanged = true;
-        }
-        if (actRight) {
-            g_nrGlobalTone = fminf(2.0f, g_nrGlobalTone + step);
+    else if (g_activeRow == 2) { // Placement Mode (Pre-SR vs Post-SR)
+        if (actionTrigger || actLeft || actRight) {
+            g_runBeforeSR = !g_runBeforeSR;
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 3) { // AI Preset Selector (0, 1, 2)
+    else if (g_activeRow == 3) { // AI Model Preset (0, 1, 2)
         if (actionTrigger || actRight) {
             g_nrPreset = (g_nrPreset + 1) % 3;
             valueChanged = true;
@@ -1434,41 +1505,31 @@ static void PollInput()
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 4) { // HUD Position (0: Bas-Centre, 1: Haut-Centre, 2: Haut-Droite, 3: Haut-Gauche)
-        if (actionTrigger || actRight) {
-            g_hudPosIndex = (g_hudPosIndex + 1) % 4;
-            valueChanged = true;
-        } else if (actLeft) {
-            g_hudPosIndex = (g_hudPosIndex + 3) % 4;
+    else if (g_activeRow == 4) { // Ray Recon (RR) - ResidualAcrossRR
+        if (actionTrigger || actLeft || actRight) {
+            g_residualAcrossRR = !g_residualAcrossRR;
             valueChanged = true;
         }
     }
-    else if (g_activeRow == 5) { // VR Scale (0: 1.0x Compact, 1: 1.5x Equilibre, 2: 2.0x Confort)
-        if (actionTrigger || actRight) {
-            g_hudScale = (g_hudScale + 1) % 3;
+    else if (g_activeRow == 5) { // VR HUD Display (Position & Scale)
+        if (actLeft) {
+            g_hudPosIndex = (g_hudPosIndex + 3) % 4;
             valueChanged = true;
-        } else if (actLeft) {
-            g_hudScale = (g_hudScale + 2) % 3;
+        } else if (actRight) {
+            g_hudPosIndex = (g_hudPosIndex + 1) % 4;
+            valueChanged = true;
+        }
+        if (actionTrigger) {
+            g_hudScale = (g_hudScale + 1) % 3;
             valueChanged = true;
         }
     }
 
-    // Real-time immediate RAM update & Arm 500ms debounce
+    // Real-time immediate update & Arm 500ms debounce
     if (valueChanged) {
         g_hudDirty = true;
         g_hasPendingSave = true;
         g_lastChangeTick = now;
-
-        if (!g_renodxBase) {
-            g_renodxBase = (uintptr_t)GetModuleHandleA("renodx-dlss5.addon64");
-        }
-        if (g_renodxBase) {
-            *(uint8_t*)(g_renodxBase + 0x192F68) = g_masterEnable ? 1 : 0;
-            *(float*)(g_renodxBase + 0x19364C) = g_masterEnable ? g_nrIntensity : 0.0f;
-            *(float*)(g_renodxBase + 0x193650) = g_nrGlobalTone;
-            *(int32_t*)(g_renodxBase + 0x196B98) = g_nrPreset;
-            *(uint8_t*)(g_renodxBase + 0x1935E8) = 1; // set dirty flag
-        }
     }
 }
 
@@ -1602,6 +1663,25 @@ static void UpdateOSDWindow(bool visible, bool isDirty)
 // ----------------------------------------------------------------------------
 // Autonomous Input Watcher Thread (100% Découplé, Zero Crash, 0 ms RAM Sync)
 // ----------------------------------------------------------------------------
+static void ApplyDeferredPriorityBoost()
+{
+    if (g_priorityBoosted) return;
+
+    // Defer until the app has had time to boot past the D3D12/OpenXR init where
+    // altering scheduling under the loader lock triggered XR_ERROR_CALL_ORDER_INVALID
+    // in RealVR64. From this thread (not DllMain) it is safe.
+    static uint64_t s_attemptTick = 0;
+    if (s_attemptTick == 0) s_attemptTick = GetTickCount64();
+    if (GetTickCount64() - s_attemptTick < 6000) return;
+
+    if (g_priorityBoostEnabled &&
+        SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
+    {
+        LogMsg("[Proxy] Process priority elevated to HIGH_PRIORITY_CLASS (deferred, post-boot).");
+    }
+    g_priorityBoosted = true;
+}
+
 static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
 {
     LogMsg("[Proxy] Input Watcher Thread started.");
@@ -1649,27 +1729,93 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
             InstallXInputHooks();
         }
 
-        // Mesurer le framerate reel de maniere 100% asynchrone sans surcharger le thread de rendu
+        // Deferred process priority boost (once, after boot; safe from this thread).
+        ApplyDeferredPriorityBoost();
+
+        // Sample the NGX evaluate rate at 200 ms and build a ms/evaluate
+        // distribution. In stereo VR the counter counts per-eye evaluates, so the
+        // numbers are a per-eye GPU-frame proxy used to diagnose how close we sit
+        // to the V-Sync budget (the reprojection cliff). Never touches the render
+        // thread; g_evalFrameCounter is read atomically.
         static uint64_t s_lastFpsMeasureTick = 0;
         static unsigned long long s_lastFpsFrameCount = 0;
         if (s_lastFpsMeasureTick == 0) s_lastFpsMeasureTick = now;
-        if (now - s_lastFpsMeasureTick >= 1000)
+        if (now - s_lastFpsMeasureTick >= 200)
         {
             uint64_t elapsed = now - s_lastFpsMeasureTick;
-            unsigned long long curFrames = g_evalFrameCounter;
+            unsigned long long curFrames = (unsigned long long)InterlockedCompareExchange64(
+                (volatile LONG64*)&g_evalFrameCounter, 0, 0);
             if (elapsed > 0 && curFrames >= s_lastFpsFrameCount)
             {
-                int measuredFps = (int)((curFrames - s_lastFpsFrameCount) * 1000 / elapsed);
-                if (measuredFps > 0 && measuredFps <= 240)
+                unsigned long long dFrames = curFrames - s_lastFpsFrameCount;
+                if (dFrames > 0)
                 {
-                    if (abs(measuredFps - g_liveHz) > 2) {
-                        g_liveHz = measuredFps;
-                        if (g_hudVisible) g_hudDirty = true;
+                    double msPerEval = (double)elapsed / (double)dFrames;
+                    g_ftMinMs = (msPerEval < g_ftMinMs) ? msPerEval : g_ftMinMs;
+                    g_ftMaxMs = (msPerEval > g_ftMaxMs) ? msPerEval : g_ftMaxMs;
+                    g_ftSumMs += msPerEval;
+                    g_ftSamples++;
+
+                    int measuredFps = (int)((double)dFrames * 1000.0 / (double)elapsed);
+                    if (measuredFps > 0 && measuredFps <= 240)
+                    {
+                        if (abs(measuredFps - g_liveHz) > 2) {
+                            g_liveHz = measuredFps;
+                            if (g_hudVisible) g_hudDirty = true;
+                        }
                     }
                 }
             }
             s_lastFpsFrameCount = curFrames;
             s_lastFpsMeasureTick = now;
+
+            // Report the distribution roughly every 2 s, only while frames run.
+            if (g_ftSamples >= 8)
+            {
+                double avg = g_ftSumMs / (double)g_ftSamples;
+                char ftBuf[160];
+                sprintf_s(ftBuf, sizeof(ftBuf),
+                    "[VR-DLSS5-PERF] per-eye ms: min=%.2f avg=%.2f max=%.2f (Hz %d)",
+                    g_ftMinMs, avg, g_ftMaxMs, g_liveHz);
+                LogMsg(ftBuf);
+
+                int budgetHz = (g_liveHz > 0) ? g_liveHz : 72;
+                double budgetMs = 1000.0 / (double)budgetHz;
+
+                // Dynamic VR Frame Guard: if per-eye avg ms approaches V-Sync cliff (within 0.88 ms),
+                // automatically throttle WorkingScale down to maintain locked refresh rate.
+                if (g_frameGuardActive && avg > (budgetMs - 0.88) && g_workingScale > 0.50f)
+                {
+                    float oldScale = g_workingScale;
+                    if (g_workingScale > 0.70f) g_workingScale = 0.66f;
+                    else if (g_workingScale > 0.55f) g_workingScale = 0.50f;
+
+                    if (g_workingScale != oldScale)
+                    {
+                        g_frameGuardTriggered = true;
+                        g_hudDirty = true;
+                        g_hasPendingSave = true;
+                        g_lastChangeTick = now;
+
+                        char guardBuf[256];
+                        sprintf_s(guardBuf, sizeof(guardBuf),
+                            "[VR-DLSS5-GUARD] V-Sync warning: per-eye frame time %.2f ms reached budget limit (%.2f ms at %d Hz). "
+                            "Auto-lowered WorkingScale %.2f -> %.2f to prevent ASW reprojection cliff!",
+                            avg, budgetMs, budgetHz, oldScale, g_workingScale);
+                        LogMsg(guardBuf);
+                    }
+                }
+                else if (avg > budgetMs)
+                {
+                    char cliffBuf[192];
+                    sprintf_s(cliffBuf, sizeof(cliffBuf),
+                        "[VR-DLSS5-PERF] WARNING: per-eye avg %.2f ms exceeds the %.2f ms V-Sync budget at %d Hz "
+                        "-> reprojection cliff active.",
+                        avg, budgetMs, budgetHz);
+                    LogMsg(cliffBuf);
+                }
+                g_ftMinMs = 1e9; g_ftMaxMs = 0.0; g_ftSumMs = 0.0; g_ftSamples = 0;
+            }
         }
 
         // 3. Écouter les entrées clavier (F6) et manettes (Select+L3)
@@ -1678,8 +1824,8 @@ static DWORD WINAPI InputWatcherThread(LPVOID lpParam)
         // 4. Mettre à jour les affichages Bureau et Casque VR uniquement lors d'un changement
         bool isDirty = g_hudDirty;
         if (g_hudVisible && isDirty) {
-            RenderModernHUD(g_hGdiMemDC, g_pGdiBits, g_masterEnable, g_nrIntensity, g_nrGlobalTone, 
-                            g_nrPreset, g_hudPosIndex, g_hudScale, g_activeRow, g_liveHz);
+            RenderModernHUD(g_hGdiMemDC, g_pGdiBits, g_masterEnable, g_workingScale, g_runBeforeSR, 
+                            g_nrPreset, g_residualAcrossRR, g_hudPosIndex, g_hudScale, g_activeRow, g_liveHz, g_frameGuardTriggered);
         }
         UpdateOSDWindow(g_hudVisible, isDirty);
         UpdateOpenVROverlay(g_hudVisible, isDirty);

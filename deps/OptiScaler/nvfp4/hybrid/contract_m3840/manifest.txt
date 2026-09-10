@@ -1,0 +1,23 @@
+cubin ../sm120_16255890_da0cd6180a8a.cubin
+kernel cutlass3x_sm120_bstensorop_s16864gemm_block_scaled_ue4m3xe2m1_ue4m3xe2m1_f32_f16_f16_128x128x256_1x1x1_0_tnn_align32_o_vs16_bias_f16_relu
+params params.bin
+grid 8 30 1
+block 384 1 1
+shared 88064
+workspace_bytes 256
+workspace_reset_bytes 0
+patch 64 A_packed 0
+patch 256 B_packed 0
+patch 448 SF_A 0
+patch 640 SF_B 0
+patch 1024 D 0
+patch 1216 D 0
+patch 1616 workspace 0
+patch 1728 A_packed 0
+patch 1920 B_packed 0
+patch 2112 SF_A 0
+patch 2304 SF_B 0
+patch 2816 SF_A 0
+patch 2880 D 0
+patch 3280 workspace 0
+patch 3328 D 0

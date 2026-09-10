@@ -5,7 +5,7 @@
 [![Graphics: DirectX 12 / OpenVR](https://img.shields.io/badge/Graphics-DirectX%2012%20%7C%20OpenVR-brightgreen.svg)]()
 [![Compiler: MSVC 2022](https://img.shields.io/badge/Compiler-MSVC%202022%20(C%2B%2B17)-orange.svg)]()
 
-Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural Reconstruction** (ReShade 6.8+ Add-on & RenoDX) with **LukeRoss R.E.A.L. VR mods** (OpenXR / SteamVR).
+Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural Reconstruction** (OptiScaler Pre-SR Multipass Engine) with **LukeRoss R.E.A.L. VR mods** (OpenXR / SteamVR).
 
 ---
 
@@ -21,9 +21,9 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
    - *Tip*: If you select an Unreal Engine launcher in the root game folder, the installer automatically detects the real target in `Binaries\Win64`.
 5. **Install / Update**: Click **Install / Update DLSS 5**.
    - If missing, the ~160 MB neural model (`nvngx_dlssnr.dll`) will be downloaded automatically with live progress.
-   - The installer creates an idempotent, safe swap of LukeRoss's `dxgi.dll` -> `RealVR64.dll`.
+   - The installer creates an idempotent, safe swap of LukeRoss's `dxgi.dll` -> `RealVR64.dll`, deploys the OptiScaler Pre-SR engine, and configures `OptiScaler.ini` for locked 72/90 FPS VR.
 6. **Launch & Play**: Start your game normally with your VR headset connected!
-7. **Rollback**: To restore vanilla LukeRoss VR at any time, simply click **Restore Vanilla LukeRoss**.
+7. **Rollback**: To restore vanilla LukeRoss VR at any time, simply click **Restore LukeRoss Vanilla**.
 
 > [!TIP]
 > **Third-Party Launchers (Ubisoft Connect, EA App, etc.)**:
@@ -41,7 +41,7 @@ The DLSS 5 <> VR HUD is rendered via OpenVR as a native 3D compositor overlay (f
 | **Cycle HUD Position** | `Y` (Xbox) / `Triangle` (PS5) | `Tab` |
 | **Cycle HUD Scale** | `R3` (Right Stick Click) | `F7` |
 | **Close HUD** | `Select + L3` / Gamepad combo | `Escape` or `F6` |
-| **ReShade Overlay** | — | `Home` |
+| **OptiScaler Advanced Menu** | — | `Insert` |
 | **LukeRoss VR Mod Menu** | Dedicated VR Menu Button | `Numpad 0-9` |
 
 > [!NOTE]
@@ -60,22 +60,26 @@ The toolchain operates at the DirectX 12, XInput, and OpenVR boundaries:
 graph TD
     Game[DirectX 12 Game Engine] -->|D3D12 / DXGI Calls| Proxy[proxy/dxgi.dll<br/>Custom Dual-Proxy]
     Proxy -->|Chained via RealVR64.dll| LukeRoss[LukeRoss R.E.A.L. VR Mod<br/>Stereo Projection & Hooks]
-    Proxy -->|Pre-loads without hook collisions| ReShade[ReShade 6.8+ 64-bit Engine]
-    ReShade -->|Loads| RenoDX[renodx-dlss5.addon64]
-    RenoDX -->|Invokes Neural Weights| Model[nvngx_dlssnr.dll<br/>DLSS 5 Model]
+    LukeRoss -->|Native ASI Detection| OptiScaler[OptiScaler.asi / OptiScaler.dll<br/>Pre-SR Multipass Engine]
+    OptiScaler -->|Forwarder| Forwarder[nvngx.dll_dlssnr.dll]
+    Forwarder -->|Neural Inferences at Pre-SR scale| Model[nvngx_dlssnr.dll<br/>DLSS 5 Model]
     Proxy -->|OpenVR Compositor Overlay + Event Pump| HUD[In-Game 3D Overlay & HUD<br/>Segoe UI Vector Render]
     Proxy -->|MinHook XInput Detours| Input[Gamepad D-Pad Filter<br/>Game input masked during HUD]
     Proxy -->|Exports 24 System Symbols| DXGI[C:\Windows\System32\dxgi.dll]
 ```
 
 #### Key Architecture Components:
-1. **Hook Collision Prevention & Explicit Chaining**:
-   LukeRoss's `RealVR64.dll` hooks DXGI swapchain creation and OpenVR presents. Loading ReShade standard `.dll` directly causes initialization deadlocks. Our `proxy/dxgi.dll` exports standard DXGI and XInput functions, safely pre-loading ReShade in passive mode before forwarding control to `RealVR64.dll`.
-2. **Stereo Frame Reconstruction**:
-   Intercepts `NVSDK_NGX_D3D12_EvaluateFeature` calls to ensure continuous neural evaluation across dual-eye render passes.
-3. **OpenVR Compositor Overlay with Self-Healing Auto-Recovery**:
+1. **LukeRoss Native OptiScaler Cooperation**:
+   LukeRoss's `RealVR64.dll` contains native detection and stereo patching for `OptiScaler.asi` (`"OptiScaler.asi loaded and patched"`). Our `proxy/dxgi.dll` chains seamlessly with `RealVR64.dll` and `OptiScaler.asi`.
+2. **Pre-SR Multipass Resolution Scaling**:
+   Unlike monolithic Post-SR approaches that choke on 29.5 million stereo VR pixels (~40 FPS), OptiScaler Pre-SR evaluates the neural network **prior** to upscaling with `WorkingScale=0.75`, reducing computation from 29.5 Mpx to 4.15 Mpx (~1.69 ms on RTX 5090) and locking solid 72/90 FPS.
+3. **Ray Reconstruction Compatibility (`ResidualAcrossRR`)**:
+   Preserves high-frequency neural reconstructed detail across Cyberpunk 2077's Ray Reconstruction denoiser without flicker or smearing.
+4. **Dynamic VR Frame Guard**:
+   Continuously monitors per-eye GPU frametimes against the V-Sync budget (e.g. 13.88 ms at 72 Hz). If frametimes approach the threshold, it dynamically adapts `WorkingScale` to safeguard against ASW/reprojection cliffs.
+5. **OpenVR Compositor Overlay with Self-Healing Auto-Recovery**:
    Renders a vector-crisp Segoe UI overlay directly through OpenVR (`IVROverlay::SetOverlayRaw`). Continuously drains the OpenVR IPC event queue via `PollNextOverlayEvent()` to prevent buffer saturation (OpenVR error 23 / `VROverlayError_RequestFailed`), and features automatic self-healing recovery that seamlessly recreates the overlay handle if SteamVR resets or enters standby.
-4. **MinHook D-Pad Isolation**:
+6. **MinHook D-Pad Isolation**:
    Hooks `XInputGetState` (and ordinal 100 `XInputGetStateEx`) on all loaded modules (`RealVR64.dll`, local and system `XINPUT1_4.dll`, `XINPUT1_3.dll`, `XINPUT9_1_0.dll`, and `joyGetPosEx`). Thread-aware filtering guarantees that the HUD thread receives unmasked controller input while the game engine's D-Pad bits are masked only when the menu is open.
 
 ---
