@@ -9,6 +9,33 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 
 ---
 
+## 🚀 How to Use
+
+### 1. Install the mod
+
+![DLSS 5 <> VR Universal Installer](assets/installer.png)
+
+1. Download **`DLSS5-VR-Release.zip`** from the [Releases](../../releases) page and extract it anywhere.
+2. Run **`VR-DLSS5-Installer.exe`**.
+3. Drag & drop your game executable onto the window (or click **Browse...**), then click **Install / Update DLSS 5**.
+4. The installer detects the LukeRoss mod and the NGX/DLSS engine, deploys the OptiScaler Pre-SR engine (`OptiScaler.asi`/`OptiScaler.dll`), configures `OptiScaler.ini` for VR (`WorkingScale=0.75`, Pre-SR, Preset 2) and downloads the ~160 MB `nvngx_dlssnr.dll` model automatically when it is missing.
+5. To roll back at any time, click **Restore LukeRoss Vanilla**.
+
+### 2. Launch the game and open the VR HUD
+
+![DLSS 5 <> VR HUD](assets/hud.png)
+
+- Start the game with your headset connected, then press **`F6`** or **`Select / Back + L3`** to open the HUD. It is rendered directly in the headset through OpenVR and mirrored on the desktop.
+- Navigate the rows with **D-Pad Up / Down**, adjust the selected value with **D-Pad Left / Right** or **`A`**.
+- Every change is applied **live** to the running OptiScaler engine through the shared-memory control channel:
+  **Neural Engine** on/off, **DLSS5 Detail** (Intensity), **DLSS5 Style**, **VR WorkingScale**, **AI Model Preset**, **Placement Mode** (Pre-SR / Post-SR) and the **VR HUD Display** (position & scale).
+- Extra shortcuts: **`F8`** Ray Reconstruction (`ResidualAcrossRR`), **`Tab`** HUD position, **`F7`** HUD scale.
+- Close the HUD with **`F6`**, **`Escape`** or **`Select / Back + L3`**.
+
+> Full control table and HUD row reference: see [In-Game HUD & Controls](#in-game-hud--controls) below.
+
+---
+
 ## 🚀 Usage & How-To (Quick Start)
 
 ### For End-Users & Players (Binary Release Mode)
@@ -178,6 +205,8 @@ python tools/tail_log.py --game-dir "C:\Program Files (x86)\Steam\steamapps\comm
 
 ```
 dlss5-vr/
+├── assets/                        # README illustrations (installer & HUD screenshots)
+│
 ├── installer/                     # Native Win32 GUI Installer (~190 KB)
 │   ├── installer.cpp              # Win32 UI, WinINet downloader, safe swap engine
 │   ├── build.bat                  # MSVC compilation script
