@@ -34,9 +34,10 @@ code (proxy, installer, tooling). Key third-party components:
   repository at commit `1b1dd650` plus the patch in `deps/optiscaler-src/`.
 - **MinHook**: Copyright (c) 2009-2017 Tsuda Kageyu. BSD 2-Clause.
 - **OpenVR SDK / `openvr_api.dll`**: Copyright (c) Valve Corporation. BSD 3-Clause.
-- **Intel XeSS runtime**: Copyright (c) Intel Corporation. See `deps/LICENSES/XeSS_LICENSE.txt`.
-- **AMD FidelityFX**: Copyright (c) Advanced Micro Devices, Inc. MIT License.
-- **Microsoft DirectX 12 Agility SDK**: Copyright (c) Microsoft Corporation. MIT License.
+- **Intel XeSS runtime**, **AMD FidelityFX** and **Microsoft DirectX 12 Agility
+  SDK**: part of the upstream OptiScaler package that the installer downloads
+  at install time; NOT redistributed here. License texts are included for
+  reference in `deps/LICENSES/`.
 - **NVIDIA CUDA runtime (`cudart64_12.dll`)**: Copyright (c) NVIDIA Corporation. Redistributed in binary form under the CUDA Toolkit EULA (Attachment A); see `deps/LICENSES/NVIDIA-CUDA-Redistribution-Notice.txt`.
 - **RenoDX**: colour processing in OptiScaler is derived from RenoDX by clshortfuse; see `deps/LICENSES/RenoDX_ATTRIBUTION.txt`.
 - **FreeType**: Used by OptiScaler; licensed under the FTL.

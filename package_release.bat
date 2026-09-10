@@ -42,10 +42,8 @@ copy /y "installer\VR-DLSS5-Installer.exe" "%DIST_DIR%\" >nul
 copy /y "proxy\dxgi.dll" "%DIST_DIR%\proxy\" >nul
 copy /y "proxy\openvr_api.dll" "%DIST_DIR%\proxy\" >nul
 copy /y "deps\OptiScaler.dll" "%DIST_DIR%\deps\" >nul
-copy /y "deps\nvngx.dll_dlssnr.dll" "%DIST_DIR%\deps\" >nul
 copy /y "deps\OptiScaler.ini" "%DIST_DIR%\deps\" >nul
 copy /y "deps\cudart64_12.dll" "%DIST_DIR%\deps\" >nul
-if exist "deps\OptiScaler" xcopy /e /i /y "deps\OptiScaler" "%DIST_DIR%\deps\OptiScaler\" >nul
 if exist "deps\LICENSES" xcopy /e /i /y "deps\LICENSES" "%DIST_DIR%\deps\LICENSES\" >nul
 if exist "deps\optiscaler-src" xcopy /e /i /y "deps\optiscaler-src" "%DIST_DIR%\deps\optiscaler-src\" >nul
 copy /y "LICENSE" "%DIST_DIR%\" >nul

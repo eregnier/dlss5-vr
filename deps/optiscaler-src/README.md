@@ -20,6 +20,9 @@ corresponding source of the modified build is made available as:
   Neural Engine toggle, WorkingScale, Pre-SR placement, residual across RR,
   preset and DLSS 5 Detail/Style.
 - `OptiScaler/dllmain.cpp`: publish loop + version/magic handshake.
+- `OptiScaler.ini`: VR-tuned defaults (Pre-SR enabled, WorkingScale 0.75,
+  residual across RR). The modified file is in this directory as
+  `OptiScaler.ini`; the code patch does not cover it.
 
 ## Rebuilding
 
