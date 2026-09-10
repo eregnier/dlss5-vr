@@ -250,5 +250,5 @@ This project is licensed under the [MIT License](LICENSE).
 
 ---
 
-*vibecoded with gemini 3.8 flash*
+*vibecoded with gemini 3.8 flash and DeepSeek Flash V4.1*
 
