@@ -23,7 +23,7 @@
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // Version Constants
-#define CURRENT_VERSION_STR L"1.0.0"
+#define CURRENT_VERSION_STR L"1.1.0"
 #define UPDATE_CHECK_URL    L"https://raw.githubusercontent.com/eregnier/dlss5-vr/main/VERSION"
 #define GITHUB_RELEASES_URL L"https://github.com/eregnier/dlss5-vr/releases"
 
@@ -511,7 +511,7 @@ std::wstring FindOrDownloadComponent(const std::wstring& fileName)
         wchar_t zipDest[MAX_PATH];
         PathCombineW(zipDest, cacheDir.c_str(), L"OptiScaler-DLSSNR-v0.7.6.zip");
 
-        std::wstring url = L"https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/download/v0.7.6-dlssnr/OptiScaler-DLSSNR-v0.7.6.zip";
+        std::wstring url = L"https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/download/v0.7.6/OptiScaler-DLSSNR-v0.7.6.zip";
         if (DownloadHttpFile(url, zipDest, L"OptiScaler Pre-SR Multipass Package (v0.7.6)")) {
             ExtractZip(zipDest, cacheDir);
             DeleteFileW(zipDest);
@@ -769,6 +769,42 @@ void DoInstall()
         if (PathFileExistsW(lp)) {
             DeleteFileW(lp);
             AppendLog(L"[CLEAN] Removed legacy component: " + lf);
+        }
+    }
+
+    // Step 2d: Quarantine a legacy OptiScaler engine left as a local proxy DLL
+    // (typically WINMM.dll from the pre-1.1 installs). Two engines in the same
+    // process fight over NGX and the HUD control channel, and the old one runs
+    // the neural pass instead of the bundled build.
+    {
+        const wchar_t* legacyEngineProxies[] = { L"WINMM.dll" };
+        for (const wchar_t* proxyName : legacyEngineProxies) {
+            wchar_t proxyPath[MAX_PATH];
+            PathCombineW(proxyPath, g_targetDir.c_str(), proxyName);
+            if (!PathFileExistsW(proxyPath))
+                continue;
+
+            HANDLE h = CreateFileW(proxyPath, GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h == INVALID_HANDLE_VALUE)
+                continue;
+
+            LARGE_INTEGER fileSize = {};
+            GetFileSizeEx(h, &fileSize);
+            CloseHandle(h);
+
+            // The real system winmm.dll is ~100 KB; a multi-MB local copy is a proxy engine.
+            if (fileSize.QuadPart > 8 * 1024 * 1024) {
+                std::wstring disabled = std::wstring(proxyPath) + L".disabled";
+                DeleteFileW(disabled.c_str());
+                if (MoveFileW(proxyPath, disabled.c_str())) {
+                    AppendLog(L"[CLEAN] Quarantined legacy engine proxy: " + std::wstring(proxyName) +
+                              L" -> " + std::wstring(proxyName) + L".disabled (restart the game launcher)");
+                } else {
+                    AppendLog(L"[WARN] Could not quarantine legacy engine proxy: " + std::wstring(proxyName));
+                }
+            }
         }
     }
 
