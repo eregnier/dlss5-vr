@@ -1,88 +1,88 @@
-# 02. Diagnostic Approfondi des Goulets d'Étranglement en VR (Cyberpunk 2077 & Luke Ross)
+# 02. In-Depth Diagnosis of VR Bottlenecks (Cyberpunk 2077 & Luke Ross)
 
-Ce document présente l'analyse mathématique, matérielle et logicielle des causes de la chute brutale de performances (72 FPS $\rightarrow$ 40 FPS, GPU 70% $\rightarrow$ 100%) lors de l'activation de DLSS 5 en réalité virtuelle.
+This document presents the mathematical, hardware and software analysis behind the brutal performance drop (72 FPS $\rightarrow$ 40 FPS, GPU 70% $\rightarrow$ 100%) when enabling DLSS 5 in virtual reality.
 
 ---
 
-## 1. La Réalité Mathématique du Rendu VR Haute Résolution
+## 1. The Mathematical Reality of High-Resolution VR Rendering
 
-### A. Surface de Pixels : Plat 4K vs VR Stéréoscopique
-Sur écran plat traditionnel, le rendu 4K Ultra-HD représente :
+### A. Pixel Surface: Flat 4K vs Stereo VR
+On a traditional flat screen, 4K Ultra-HD rendering represents:
 $$S_{\text{flat 4K}} = 3840 \times 2160 = \mathbf{8\,294\,400\text{ pixels}}$$
 
-En casque de réalité virtuelle haute fidélité (Meta Quest 3 supersamplé ou Pimax Crystal en natif) :
-- Résolution cible par œil : $\sim 3840 \times 3840$ pixels.
-- Surface par œil : $3840 \times 3840 = 14\,745\,600\text{ pixels}$.
-- **Surface totale stéréoscopique par image** :
+In a high-fidelity VR headset (supersampled Meta Quest 3 or native Pimax Crystal):
+- Target resolution per eye: $\sim 3840 \times 3840$ pixels.
+- Surface per eye: $3840 \times 3840 = 14\,745\,600\text{ pixels}$.
+- **Total stereoscopic surface per image**:
   $$S_{\text{VR total}} = 14\,745\,600 \times 2 = \mathbf{29\,491\,200\text{ pixels}}$$
 
-Le pipeline graphique VR traite **3,56 fois plus de pixels** que la 4K standard sur écran plat. À 72 Hz, le GPU doit générer et post-traiter plus de **2,12 milliards de pixels chaque seconde**.
+The VR graphics pipeline processes **3.56× more pixels** than standard flat 4K. At 72 Hz, the GPU must generate and post-process more than **2.12 billion pixels every second**.
 
 ---
 
-## 2. La Mécanique de Rupture de la V-Sync VR : L'Effet "Falaise"
+## 2. The Mechanics of the VR V-Sync Cliff: The "Cliff" Effect
 
-### A. Le Budget Temporel Strict
-Contrairement aux écrans d'ordinateurs dotés de G-Sync / FreeSync où le rafraîchissement s'adapte frame par frame, un casque VR exige une synchronisation rigoureuse avec les panneaux de micro-écrans pour éviter la cinétose (mal des transports).
+### A. The Strict Time Budget
+Unlike computer monitors with G-Sync / FreeSync where the refresh adapts frame by frame, a VR headset requires strict synchronization with its micro-display panels to avoid motion sickness.
 
-| Fréquence Casque | Budget V-Sync Strict ($\Delta t_{\text{budget}}$) | Seuil de Tolérance |
+| Headset rate | Strict V-Sync budget ($\Delta t_{\text{budget}}$) | Tolerance threshold |
 | :--- | :--- | :--- |
-| **72 Hz** (Standard Quest 3 / Pimax) | **13,88 ms** | $> 13,88\text{ ms} \rightarrow$ Chute à **36 FPS** |
-| **80 Hz** | **12,50 ms** | $> 12,50\text{ ms} \rightarrow$ Chute à **40 FPS** |
-| **90 Hz** (Standard Pimax Crystal) | **11,11 ms** | $> 11,11\text{ ms} \rightarrow$ Chute à **45 FPS** |
-| **120 Hz** | **8,33 ms** | $> 8,33\text{ ms} \rightarrow$ Chute à **60 FPS** |
+| **72 Hz** (Quest 3 / Pimax standard) | **13.88 ms** | $> 13.88\text{ ms} \rightarrow$ drop to **36 FPS** |
+| **80 Hz** | **12.50 ms** | $> 12.50\text{ ms} \rightarrow$ drop to **40 FPS** |
+| **90 Hz** (Pimax Crystal standard) | **11.11 ms** | $> 11.11\text{ ms} \rightarrow$ drop to **45 FPS** |
+| **120 Hz** | **8.33 ms** | $> 8.33\text{ ms} \rightarrow$ drop to **60 FPS** |
 
-### B. Pourquoi 40 FPS et 100% GPU ?
-Considérons les mesures réelles relevées sur une **NVIDIA GeForce RTX 5090** sous Cyberpunk 2077 avec le mod LukeRoss (DLSS Performance) :
+### B. Why 40 FPS and 100% GPU?
+Consider the real measurements taken on an **NVIDIA GeForce RTX 5090** in Cyberpunk 2077 with the LukeRoss mod (DLSS Performance):
 
-1. **Rendu du jeu de base (Cyberpunk 2077)** :
-   - Temps de frame GPU de base : $\sim 9,7\text{ ms}$.
-   - Charge GPU : $\frac{9,7}{13,88} \approx \mathbf{70\%}$.
-   - Marge restante : $13,88 - 9,7 = \mathbf{4,18\text{ ms}}$.
-   - **Résultat : 72 FPS parfaits et stables.**
+1. **Base game rendering (Cyberpunk 2077)**:
+   - Base GPU frame time: $\sim 9.7\text{ ms}$.
+   - GPU load: $\frac{9.7}{13.88} \approx \mathbf{70\%}$.
+   - Remaining headroom: $13.88 - 9.7 = \mathbf{4.18\text{ ms}}$.
+   - **Result: perfect, stable 72 FPS.**
 
-2. **Activation de DLSS 5 via RenoDX (Post-SR Monolithique)** :
-   - Le modèle `nvngx_dlssnr.dll` pèse 165 Mo et compte des millions de poids FP16/FP8.
-   - Le temps d'inférence Tensor Core pour traiter 29,49 millions de pixels est de :
-     $$T_{\text{Tensor}} \approx \mathbf{12,0\text{ ms}}$$
-   - **Temps total requis par trame** :
-     $$T_{\text{total}} = 9,7\text{ ms (moteur)} + 12,0\text{ ms (DLSS 5)} = \mathbf{21,7\text{ ms}}$$
+2. **Enabling DLSS 5 through RenoDX (monolithic Post-SR)**:
+   - The `nvngx_dlssnr.dll` model weighs 165 MB and contains millions of FP16/FP8 weights.
+   - Tensor Core inference time to process 29.49 million pixels is:
+     $$T_{\text{Tensor}} \approx \mathbf{12.0\text{ ms}}$$
+   - **Total time required per frame**:
+     $$T_{\text{total}} = 9.7\text{ ms (engine)} + 12.0\text{ ms (DLSS 5)} = \mathbf{21.7\text{ ms}}$$
 
-3. **Le Déclenchement de la Reprojection Asynchrone (ASW / Motion Smoothing)** :
-   - $21,7\text{ ms} \gg 13,88\text{ ms}$. Le moteur rate systématiquement la fenêtre V-Sync.
-   - Le runtime VR (Oculus / SteamVR) verrouille immédiatement la fréquence d'affichage à **la moitié de la fréquence native** :
-     $$72\text{ Hz} \longrightarrow \mathbf{36\text{ à }40\text{ FPS}}$$
-   - Pour chaque trame réelle calculée en retard (qui prend 21,7 ms), le compositeur injecte une trame synthétisée artificiellement par reprojection spatio-temporelle.
-   - Le GPU tourne à 100% car il est constamment en retard et cherche à rattraper le train de trames suivant.
-   - **L'effet "dents de scie"** : La charge alterne entre 100% (trame en retard) et 50% (attente de la pose suivante par le compositeur), créant une instabilité perçue désagréable.
-
----
-
-## 3. Les Goulets d'Étranglement Internes Identifiés au Niveau Binaire
-
-Outre le volume brut de pixels, l'audit binaire et mémoire a identifié plusieurs faiblesses critiques dans l'ancienne implémentation RenoDX + Proxy :
-
-### A. Le Piège du Slot 0 (UAV Hazard Direct3D 12)
-- Dans le code désassemblé de `renodx-dlss5.addon64` à l'offset `0xDF64`, l'ancien patch d'urgence forçait l'assignation au `Slot 0` de mémoire scratch.
-- En VR, les deux yeux sont soumis consécutivement : l'œil gauche écrivait dans le Slot 0, et l'œil droit écrasait les UAVs du Slot 0 quelques microsecondes plus tard.
-- Le pilote NVIDIA D3D12 détectait une collision d'écriture concurrente sans barrière mémoire et déclenchait un **GPU Pipeline Flush complet** (`ExecuteCommandLists` serialization), ruinant tout parallélisme de calcul.
-
-### B. La Sérialisation Inter-Queues (`CommandQueue->Wait`)
-- À l'offset `0x31150`, RenoDX attendait le fence de la soumission précédente.
-- En VR multi-queues (soumission stéréoscopique de LukeRoss), cette synchronisation mutuelle bloquait le thread de rendu GPU jusqu'à l'achèvement complet de l'autre œil, empêchant l'overlap de rendu.
-
-### C. L'Appel Disque Synchrone sur le Hot-Path
-- L'ancien proxy effectuait des écritures et lectures `WritePrivateProfileString` / `GetPrivateProfileString` synchrones directement sur le thread de rendu à 144 Hz (72 Hz × 2 yeux). Chaque accès disque bloquait le CPU de 0,5 à 2 ms, suffisant pour faire basculer la trame au-delà du budget V-Sync.
-
-### D. La Collision des Registres `NRPreset` et `NRStyle`
-- Dans la structure interne de RenoDX, l'adresse `0x196B98` gère l'architecture du réseau (`NRPreset`), tandis que `0x196C2C` gère le ton d'image (`NRStyle`).
-- L'écriture simultanée modifiait violemment le tone-mapping cinématique tout en laissant l'utilisateur penser que le coût IA variait peu.
-- De plus, les presets de réseau neuronal ne sont pris en compte par NGX **qu'à la création de la feature**. Une modification à chaud en jeu n'avait aucun effet sans reconstruction explicite de la ressource.
+3. **Asynchronous reprojection kicks in (ASW / Motion Smoothing)**:
+   - $21.7\text{ ms} \gg 13.88\text{ ms}$. The engine systematically misses the V-Sync window.
+   - The VR runtime (Oculus / SteamVR) immediately locks the display rate to **half the native rate**:
+     $$72\text{ Hz} \longrightarrow \mathbf{36\text{ to }40\text{ FPS}}$$
+   - For every real frame computed late (taking 21.7 ms), the compositor injects a frame synthesized through spatio-temporal reprojection.
+   - The GPU runs at 100% because it is constantly late and trying to catch up with the next frame train.
+   - **The sawtooth effect**: load alternates between 100% (late frame) and 50% (waiting for the compositor's next pose), creating an unpleasant perceived instability.
 
 ---
 
-## 4. Conclusion & Solution Architecturale
+## 3. The Internal Bottlenecks Identified at Binary Level
 
-Tous les éléments convergent vers une conclusion univoque :
-- **Il est physiquement et mathématiquement impossible de faire tourner un réseau neuronal de débruitage/reconstruction lourd (165 Mo) en Post-SR à 4K par œil (29,5 Mpx) en respectant un budget de 13,88 ms.**
-- **La seule et unique méthode viable consiste à exécuter le réseau neuronal en Pre-SR**, c'est-à-dire **sur le tampon de rendu basse résolution (1920 × 1920 ou inférieur via `WorkingScale`)**, exactement ce que réalise l'architecture de `wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass`.
+Besides the raw pixel volume, the binary and memory audit identified several critical weaknesses in the old RenoDX + proxy implementation:
+
+### A. The Slot 0 Trap (Direct3D 12 UAV Hazard)
+- In the disassembled code of `renodx-dlss5.addon64` at offset `0xDF64`, the old emergency patch forced assignment to `Slot 0` scratch memory.
+- In VR both eyes are submitted consecutively: the left eye wrote to Slot 0, and the right eye overwrote Slot 0's UAVs a few microseconds later.
+- The NVIDIA D3D12 driver detected a concurrent write collision with no memory barrier and triggered a full **GPU Pipeline Flush** (`ExecuteCommandLists` serialization), destroying all compute parallelism.
+
+### B. Inter-Queue Serialization (`CommandQueue->Wait`)
+- At offset `0x31150`, RenoDX waited on the previous submission's fence.
+- In a multi-queue VR setup (LukeRoss stereoscopic submission), that mutual synchronization blocked the GPU render thread until the other eye finished completely, preventing render overlap.
+
+### C. Synchronous Disk Access on the Hot Path
+- The old proxy performed synchronous `WritePrivateProfileString` / `GetPrivateProfileString` reads and writes directly on the render thread at 144 Hz (72 Hz × 2 eyes). Each disk access blocked the CPU for 0.5 to 2 ms, enough to push the frame past the V-Sync budget.
+
+### D. The `NRPreset` vs `NRStyle` Register Collision
+- In RenoDX's internal structure, address `0x196B98` drives the network architecture (`NRPreset`), while `0x196C2C` drives the image tone (`NRStyle`).
+- Writing both at once violently changed cinematic tone mapping while letting the user believe the AI cost barely varied.
+- Moreover, NGX only takes neural network presets into account **when the feature is created**. A hot change in-game had no effect without explicitly re-creating the resource.
+
+---
+
+## 4. Conclusion & Architectural Solution
+
+Everything converges on one unambiguous conclusion:
+- **It is physically and mathematically impossible to run a heavy denoising/reconstruction neural network (165 MB) in Post-SR at 4K per eye (29.5 Mpx) within a 13.88 ms budget.**
+- **The only viable method is to run the neural network in Pre-SR**, that is, **on the low-resolution render buffer (1920 × 1920 or lower via `WorkingScale`)**, exactly what the `wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass` architecture does.

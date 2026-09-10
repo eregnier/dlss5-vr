@@ -23,7 +23,8 @@ flowchart LR
   - Dossier `OptiScaler/` (backends D3D12, FSR 3.1 FG, XeSS FG, kernels nvfp4)
   - `OptiScaler.ini` complet
 
-### Étape 2 : Outillage de Diagnostic & Simulation Mathématique (Complété)
+### Étape 2 : Outillage de Diagnostic & Simulation Mathématique (Complété, outillage retiré en v1.1.0)
+> **[Archive]** Les scripts `tools/` et l'ancien outil Go `vr-dlss5-patch` ont été retirés du dépôt en v1.1.0 (le pipeline passe par `VR-DLSS5-Installer.exe`). Les résultats ci-dessous restent valides.
 - [x] `tools/vr_perf_simulator.py` : Simulateur mathématique complet validant que `RunBeforeSR` + `WorkingScale=0.75` ramène le temps de trame à 12,89 ms (< 13,88 ms) à 72 Hz.
 - [x] `tools/dlss5_binary_inspector.py` : Inspecteur d'en-têtes PE, architectures CUDA (`sm_89`, `sm_90`) et signatures. Découverte de `"OptiScaler.asi loaded and patched"` dans `RealVR64.dll`.
 - [x] `tools/optiscaler_vr_configurator.py` : Générateur automatique de configuration optimisée pour Cyberpunk 2077 VR.

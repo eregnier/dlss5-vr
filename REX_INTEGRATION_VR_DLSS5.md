@@ -1,5 +1,7 @@
 # REX & Architecture d'Integration : LukeRoss REAL VR + DLSS 5 (Neural Reconstruction)
 
+> **[Archive]** Ce document decrit la phase historique RenoDX / ReShade (abandonnee). Depuis la v1.1.0, le pipeline passe par **`VR-DLSS5-Installer.exe`** + OptiScaler Pre-SR et **l'outil Go `vr-dlss5-patch` a ete retire du depot** (le cache de telechargement bascule vers `%LOCALAPPDATA%\DLSS5-VR\cache`). Les sections sur les patches binaires RenoDX sont conservees comme reference historique.
+
 Ce document consigne l'ensemble des decouvertes, pieges non intuitifs, analyses scientifiques et methodologies developpees au cours du projet pour faire cohabiter le mod **LukeRoss R.E.A.L. VR** et **DLSS 5 (RenoDX Neural Rendering / nvngx_dlssnr.dll)** de facon transparente, sans decompilation, avec un overhead nul.
 
 ---
@@ -156,8 +158,8 @@ Tout au long du projet, les intuitions et les exigences de methode de l'utilisat
 - **renodx-dlss5.addon64** (patche 0xDFF5 pool infini + 0xA13F eval continue) :
   - RenoDX hooke _nvngx.dll et applique les poids neuronaux de nvngx_dlssnr.dll.
 
-### 4.2 Alignement de l'Outil Automatique Go (`vr-dlss5-patch`)
-L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes chirurgicales du REX :
+### 4.2 Outil Automatique (retire en v1.1.0)
+L'outil Go `vr-dlss5-patch` a ete supprime du depot : le deploiement automatique est desormais assure par `installer/VR-DLSS5-Installer.exe`. Les details ci-dessous sont conserves comme archive de la phase RenoDX :
 1. Déploiement automatique du dual-proxy C++ (`proxy/dxgi.dll`) et renommage de LukeRoss en `RealVR64.dll` en cas de présence VR (Architecture B).
 2. Application in-place de tous les patches binaires PE via `installer.go:ensureLukeRossCompatibility()` :
    - `ReShadeVersion` -> `ReShxdeVersion` dans RealVR64.dll
@@ -249,8 +251,8 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
 - **renodx-dlss5.addon64** (patché pool infini 0xDF64/0xDF97 + 16 portes ANY_HANDLE aux offsets 0x36EEF et 0x36F70 + 5 portes Host State Incomplete aux offsets 0x36643..0x36677) :
   - Hooke _nvngx.dll et applique les poids neuronaux Tensor Core de nvngx_dlssnr.dll.
 
-### 4.2 Alignement de l'Outil Automatique Go (`vr-dlss5-patch`)
-L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes chirurgicales du REX :
+### 4.2 Outil Automatique (retire en v1.1.0)
+L'outil Go `vr-dlss5-patch` a ete supprime du depot : le deploiement automatique est desormais assure par `installer/VR-DLSS5-Installer.exe`. Les details ci-dessous sont conserves comme archive de la phase RenoDX :
 1. Déploiement automatique du dual-proxy C++ (`proxy/dxgi.dll`) et renommage de LukeRoss en `RealVR64.dll` en cas de présence VR (Architecture B).
 2. Application in-place de tous les patches binaires PE via `installer.go:ensureLukeRossCompatibility()` :
    - `ReShadeVersion` -> `ReShxdeVersion` dans RealVR64.dll
@@ -300,11 +302,7 @@ L'outil Go `vr-dlss5-patch` a ete synchronise avec l'ensemble des decouvertes ch
 
 ## 5. Recette Reproductible pour un Nouveau Jeu
 
-1. **Via l'outil automatique Go** :
-   ```powershell
-   cd C:\code\vrdlss5\vr-dlss5-patch
-   .\vr-dlss5-patch.exe -game "D:\Games\NomDuJeu"
-   ```
+1. **Via l'installeur (recommande)** : lancer `installer/VR-DLSS5-Installer.exe`, selectionner l'executable du jeu, choisir son `nvngx_dlssnr.dll`, puis **Install / Update DLSS 5**.
 2. **Ou manuellement** :
    - Renommer le dxgi.dll de LukeRoss en RealVR64.dll.
    - Patcher RealVR64.dll : remplacer le texte ASCII ReShadeVersion par ReShxdeVersion, et patcher l'offset `0x25EE03` (6x NOP).

@@ -1,9 +1,0 @@
-=== CARTOGRAPHIE COMPLETE DU CALL GRAPH VERS L INJECTION FEATURE 18 ===
-1. Chaine d appel vers 0x9570 (Routine d execution Feature 18) :
--> Fonction 0x009570 appelee par 1 sites:
-   Appel a 0x00DC22
-  -> Fonction 0x00DC00 appelee par 0 sites:
-
-2. Chaine d appel vers la zone 0xDB00 - 0xDE00 :
-   Fonction 0x00DB00 appelee par: ['0x73ea', '0x9288', '0xa39b', '0xa4a4', '0xa708', '0xa7a8', '0xa938', '0xf94b', '0xfc95', '0xfd15', '0x10943', '0x10983', '0x1781a', '0x41305', '0x413b5', '0x41948']
-   Fonction 0x00DB90 appelee par: ['0x9322', '0xa3ba', '0x42154']

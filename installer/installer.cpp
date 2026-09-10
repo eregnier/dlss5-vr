@@ -551,10 +551,18 @@ std::wstring GetCacheDirectory()
 {
     wchar_t localApp[MAX_PATH];
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH)) {
-        wchar_t cachePath[MAX_PATH];
-        PathCombineW(cachePath, localApp, L"vr-dlss5-patch\\cache");
-        CreateDirectoryW(cachePath, NULL);
-        return std::wstring(cachePath);
+        std::wstring root = std::wstring(localApp) + L"\\DLSS5-VR";
+        std::wstring cachePath = root + L"\\cache";
+
+        // Reuse the cache left by the retired Go CLI (vr-dlss5-patch) so users
+        // do not re-download the engine/model packages.
+        std::wstring legacyPath = std::wstring(localApp) + L"\\vr-dlss5-patch\\cache";
+        if (!PathFileExistsW(cachePath.c_str()) && PathFileExistsW(legacyPath.c_str()))
+            return legacyPath;
+
+        CreateDirectoryW(root.c_str(), NULL);
+        CreateDirectoryW(cachePath.c_str(), NULL);
+        return cachePath;
     }
     return L".";
 }

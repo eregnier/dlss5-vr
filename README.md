@@ -144,9 +144,6 @@ graph TD
 - **OS**: Windows 10/11 x64
 - **Compiler**: Visual Studio 2022 (MSVC `cl.exe` v143+ with C++17 support)
   - Workload: *Desktop development with C++* (Visual Studio Community or Build Tools)
-- **Optional**:
-  - Python 3.10+ (for live debugging scripts in `tools/`)
-  - Go 1.22+ (for `vr-dlss5-patch` headless CLI)
 
 ---
 
@@ -186,12 +183,6 @@ build.bat
 - Zero external runtime dependencies.
 - Links `comctl32.lib`, `wininet.lib`, `shell32.lib`, `shlwapi.lib`, `advapi32.lib`.
 
-##### C. Build the Headless CLI (`vr-dlss5-patch`)
-```cmd
-cd C:\code\dlss5-vr\vr-dlss5-patch
-go build -o vr-dlss5-patch.exe main.go
-```
-
 ---
 
 ### Hot-Reload & Development Workflow
@@ -204,10 +195,9 @@ cd C:\code\dlss5-vr\proxy
 .\build.bat
 .\deploy.ps1 -GameDir "C:\Program Files (x86)\Steam\steamapps\common\Star Wars Outlaws"
 ```
-3. Monitor logs in real-time:
-```cmd
-python tools/tail_log.py --game-dir "C:\Program Files (x86)\Steam\steamapps\common\Star Wars Outlaws"
-```
+3. Watch the logs written next to the game executable:
+   - `vr_dlss5_proxy.log` — proxy: HUD, input paths, control-channel publishes, frame guard
+   - `OptiScaler.log` — engine: Pre-SR placement, live setting applies, per-pass cost
 
 ---
 
@@ -237,21 +227,6 @@ dlss5-vr/
 │   ├── OptiScaler.ini             # Default engine configuration
 │   ├── nvngx.dll_dlssnr.dll       # NVIDIA signature forwarder
 │   ├── cudart64_12.dll            # NVIDIA CUDA 12 runtime
-│   └── README.md
-│
-├── tools/                         # Developer Live Diagnostics (Python)
-│   ├── diag.py                    # Process RAM hooks & injection inspector
-│   ├── tail_log.py                # Dual log tailer (proxy + OptiScaler + LukeRoss)
-│   ├── live_probe.py              # One-command live probe of a running session
-│   ├── dlss5_binary_inspector.py  # PE / CUDA / signature inspector
-│   ├── optiscaler_vr_configurator.py # Cyberpunk VR INI generator
-│   ├── vr_perf_simulator.py       # RunBeforeSR/WorkingScale cost model
-│   ├── deploy_optiscaler_vr.ps1   # One-click OptiScaler VR deployment
-│   ├── audit/                     # RealVR64 / DXGI disassembly audits
-│   └── README.md
-│
-├── vr-dlss5-patch/                # Headless Go CLI Automation Tool
-│   ├── main.go, detector/, ...    # Go sources for CLI usage
 │   └── README.md
 │
 ├── package_release.bat            # Automated 1-click CI/CD packaging script (.zip)
