@@ -17,19 +17,21 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 
 1. Download **`DLSS5-VR-Release.zip`** from the [Releases](../../releases) page and extract it anywhere.
 2. Run **`VR-DLSS5-Installer.exe`**.
-3. Drag & drop your game executable onto the window (or click **Browse...**), then click **Install / Update DLSS 5**.
-4. The installer detects the LukeRoss mod and the NGX/DLSS engine, deploys the OptiScaler Pre-SR engine (`OptiScaler.asi`/`OptiScaler.dll`), configures `OptiScaler.ini` for VR (`WorkingScale=0.75`, Pre-SR, Preset 2), and quarantines any legacy competing engine (`WINMM.dll`).
-5. To roll back at any time, click **Restore LukeRoss Vanilla**.
+3. Drag & drop your game executable onto the window (or click **Browse...**).
+4. **Find and select the DLSS 5 runtime yourself**: click **Select file...** and point at the `nvngx_dlssnr.dll` you sourced on your side (NVIDIA Neural Rendering runtime, build **310.8**). See the note below.
+5. Click **Install / Update DLSS 5**. The installer detects the LukeRoss mod and the NGX/DLSS engine, deploys the OptiScaler Pre-SR engine (`OptiScaler.asi`/`OptiScaler.dll`), configures `OptiScaler.ini` for VR (`WorkingScale=0.75`, Pre-SR, Preset 2), copies your `nvngx_dlssnr.dll` next to the game executable and quarantines any legacy competing engine (`WINMM.dll`).
+6. To roll back at any time, click **Restore LukeRoss Vanilla**.
 
 > [!IMPORTANT]
-> **The NVIDIA Neural Rendering runtime (`nvngx_dlssnr.dll`, ~160 MB) is NOT bundled and NOT downloaded by this project** — it is NVIDIA proprietary and must be supplied by the user, as required by the upstream [OptiScaler-DLSSNR install guide](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/blob/main/INSTALL-DLSSNR.md).
-> Obtain the **310.8 runtime** for your GPU (**RTX 50**: NVIDIA-signed original, **RTX 20/30/40**: ShortFuse cross-generation) and give it to the installer:
-> - click **Select file...** (or simply drag & drop the DLL onto the installer window);
-> - the installer validates the file name and computes its **SHA-256**, recognized against the two known 310.8 builds (unknown hashes are accepted with a warning so you stay in control);
-> - the path is **remembered** in `%LOCALAPPDATA%\DLSS5-VR\installer.ini` and reused for every later install/update;
-> - if the file is moved or deleted, the installer detects the stale path, clears it and asks you to pick it again — it never silently skips the model.
+> **The DLSS 5 runtime (`nvngx_dlssnr.dll`, ~160 MB) is NOT included in this project and is NOT downloaded by the installer: you must find/source it yourself.**
+> This file is NVIDIA proprietary, so it is deliberately neither bundled nor fetched from any mirror (official or not) by this project. Use the upstream [OptiScaler-DLSSNR install guide](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/blob/main/INSTALL-DLSSNR.md) to know which build matches your GPU:
+> - **RTX 50**: original NVIDIA-signed 310.8 runtime
+> - **RTX 20 / 30 / 40**: ShortFuse cross-generation 310.8 runtime
 >
-> It is then copied next to the game executable during **Install / Update**. No unofficial mirror is ever contacted.
+> Give that file to the installer (**Select file...** or drag & drop the DLL onto the window). The installer will:
+> - validate the file name and compute its **SHA-256**, recognized against the two known 310.8 builds (unknown hashes are accepted with a warning so you stay in control);
+> - **remember the path** in `%LOCALAPPDATA%\DLSS5-VR\installer.ini` and reuse it for every later install/update;
+> - detect a moved/deleted file, clear the stale path and ask you to pick it again — it never silently skips the model.
 
 ### 2. Launch the game and open the VR HUD
 
