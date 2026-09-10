@@ -3,9 +3,11 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shlwapi.h>
 #include <tlhelp32.h>
 #include <wininet.h>
+#include <wincrypt.h>
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -37,10 +39,14 @@
 #define IDC_EDIT_LOG        1007
 #define IDC_PROGRESS_BAR    1008
 #define IDC_BTN_UPDATE      1009
+#define IDC_EDIT_MODEL      1010
+#define IDC_BTN_MODEL       1011
 
 HWND g_hMainWnd = NULL;
 HWND g_hEditPath = NULL;
 HWND g_hBtnBrowse = NULL;
+HWND g_hEditModel = NULL;
+HWND g_hBtnModel = NULL;
 HWND g_hBtnInstall = NULL;
 HWND g_hBtnRestore = NULL;
 HWND g_hBtnRefresh = NULL;
@@ -53,7 +59,15 @@ HFONT g_hFontNormal = NULL;
 HFONT g_hFontMono = NULL;
 
 std::wstring g_selectedExe = L"";
+std::wstring g_selectedModel = L"";   // user-provided nvngx_dlssnr.dll ("found elsewhere")
 std::wstring g_targetDir = L"";
+
+// NVIDIA Neural Rendering runtime hashes from the upstream install guide.
+static const wchar_t* kModelDllName = L"nvngx_dlssnr.dll";
+static const wchar_t* kModelHashRtx50 =
+    L"E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E";
+static const wchar_t* kModelHashShortFuse =
+    L"E67DEE209320CDAFE0E93E45675D7AA34323A53ACC57A72B2E40A181581C989A";
 
 bool g_hasLukeRoss = false;
 bool g_hasRealVR64 = false;
@@ -82,6 +96,163 @@ void AppendLog(const std::wstring& text)
     SendMessageW(g_hEditLog, EM_SCROLLCARET, 0, 0);
 
     ProcessWindowMessages();
+}
+
+// ---------------------------------------------------------------------------
+// User-provided NVIDIA runtime (nvngx_dlssnr.dll)
+//
+// The runtime is NVIDIA proprietary: this installer neither bundles it nor
+// downloads it from unofficial mirrors. The user points at the file they
+// obtained themselves; we validate it, remember the path and copy it next to
+// the game executable during install.
+// ---------------------------------------------------------------------------
+void InspectTarget();
+
+std::wstring ComputeFileSha256(const std::wstring& path)
+{
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return L"";
+
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    std::wstring result;
+
+    if (CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) &&
+        CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash))
+    {
+        BYTE buffer[1 << 16];
+        DWORD read = 0;
+        while (ReadFile(hFile, buffer, sizeof(buffer), &read, NULL) && read > 0)
+            CryptHashData(hHash, buffer, read, 0);
+
+        BYTE digest[32] = {0};
+        DWORD digestLen = sizeof(digest);
+        if (CryptGetHashParam(hHash, HP_HASHVAL, digest, &digestLen, 0))
+        {
+            static const wchar_t* hex = L"0123456789ABCDEF";
+            result.reserve(64);
+            for (DWORD i = 0; i < digestLen; i++)
+            {
+                result.push_back(hex[digest[i] >> 4]);
+                result.push_back(hex[digest[i] & 0x0F]);
+            }
+        }
+    }
+
+    if (hHash) CryptDestroyHash(hHash);
+    if (hProv) CryptReleaseContext(hProv, 0);
+    CloseHandle(hFile);
+    return result;
+}
+
+std::wstring GetInstallerSettingsPath()
+{
+    wchar_t appData[MAX_PATH] = L"";
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, appData)))
+        return L"";
+
+    std::wstring dir = std::wstring(appData) + L"\\DLSS5-VR";
+    CreateDirectoryW(dir.c_str(), NULL);
+    return dir + L"\\installer.ini";
+}
+
+void SaveInstallerSettings()
+{
+    std::wstring ini = GetInstallerSettingsPath();
+    if (ini.empty()) return;
+    if (!g_selectedModel.empty())
+        WritePrivateProfileStringW(L"Paths", L"ModelFile", g_selectedModel.c_str(), ini.c_str());
+    if (!g_selectedExe.empty())
+        WritePrivateProfileStringW(L"Paths", L"GameExe", g_selectedExe.c_str(), ini.c_str());
+}
+
+void LoadInstallerSettings()
+{
+    std::wstring ini = GetInstallerSettingsPath();
+    if (ini.empty()) return;
+
+    wchar_t buffer[MAX_PATH] = L"";
+    if (GetPrivateProfileStringW(L"Paths", L"ModelFile", L"", buffer, MAX_PATH, ini.c_str()) > 0)
+    {
+        if (PathFileExistsW(buffer)) {
+            g_selectedModel = buffer;
+            if (g_hEditModel) SetWindowTextW(g_hEditModel, g_selectedModel.c_str());
+            AppendLog(L"[MODEL] Restored previous selection: " + g_selectedModel);
+        } else {
+            // Never keep a stale path: it would silently skip the file at install.
+            WritePrivateProfileStringW(L"Paths", L"ModelFile", NULL, ini.c_str());
+            AppendLog(L"[MODEL] Saved selection no longer exists, cleared: " + std::wstring(buffer));
+        }
+    }
+    if (GetPrivateProfileStringW(L"Paths", L"GameExe", L"", buffer, MAX_PATH, ini.c_str()) > 0
+        && PathFileExistsW(buffer))
+    {
+        g_selectedExe = buffer;
+        if (g_hEditPath) SetWindowTextW(g_hEditPath, g_selectedExe.c_str());
+        AppendLog(L"[TARGET] Restored previous target: " + g_selectedExe);
+    }
+}
+
+void SelectModelFile(HWND hWnd, const std::wstring& path)
+{
+    if (path.empty() || !PathFileExistsW(path.c_str())) {
+        MessageBoxW(hWnd, L"File not found.", L"Model file", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    const wchar_t* baseName = PathFindFileNameW(path.c_str());
+    if (_wcsicmp(baseName, kModelDllName) != 0) {
+        int res = MessageBoxW(hWnd,
+            L"The selected file is not named nvngx_dlssnr.dll.\n\n"
+            L"It will be copied to the game folder under that exact name. Continue?",
+            L"Unexpected file name", MB_YESNO | MB_ICONWARNING);
+        if (res != IDYES) return;
+    }
+
+    g_selectedModel = path;
+    if (g_hEditModel) SetWindowTextW(g_hEditModel, g_selectedModel.c_str());
+    AppendLog(L"[MODEL] User-provided runtime: " + g_selectedModel);
+
+    std::wstring hash = ComputeFileSha256(path);
+    if (!hash.empty()) {
+        AppendLog(L"[MODEL] SHA-256: " + hash);
+        if (hash == kModelHashRtx50)
+            AppendLog(L"[MODEL] Recognized: NVIDIA-signed 310.8 (RTX 50)");
+        else if (hash == kModelHashShortFuse)
+            AppendLog(L"[MODEL] Recognized: ShortFuse cross-generation 310.8 (RTX 20/30/40)");
+        else
+            AppendLog(L"[MODEL] Unrecognized hash - verify the file yourself before installing.");
+    }
+
+    SaveInstallerSettings();
+    InspectTarget();
+}
+
+// True when a usable NVIDIA runtime is currently selected. If it was moved or
+// deleted since it was picked (or since the last run), the stale path is
+// dropped, the settings are cleaned and the user is told to pick it again.
+bool VerifySelectedModel(bool clearIfMissing)
+{
+    if (g_selectedModel.empty())
+        return false;
+
+    if (PathFileExistsW(g_selectedModel.c_str()))
+        return true;
+
+    AppendLog(L"[MODEL] Selected runtime file is no longer on disk: " + g_selectedModel);
+    AppendLog(L"[MODEL] Please pick it again with Browse (or place it next to the game exe).");
+
+    if (clearIfMissing) {
+        g_selectedModel.clear();
+        if (g_hEditModel) SetWindowTextW(g_hEditModel, L"");
+        std::wstring ini = GetInstallerSettingsPath();
+        if (!ini.empty())
+            WritePrivateProfileStringW(L"Paths", L"ModelFile", NULL, ini.c_str());
+    }
+    return false;
 }
 
 void SetProgressVisible(bool visible)
@@ -461,6 +632,13 @@ std::wstring FindOptiScalerBackendDir()
 
 std::wstring FindOrDownloadComponent(const std::wstring& fileName)
 {
+    // User-selected NVIDIA runtime takes priority and is never downloaded.
+    if (fileName == kModelDllName && !g_selectedModel.empty() &&
+        PathFileExistsW(g_selectedModel.c_str()))
+    {
+        return g_selectedModel;
+    }
+
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
     PathRemoveFileSpecW(exePath);
@@ -485,21 +663,33 @@ std::wstring FindOrDownloadComponent(const std::wstring& fileName)
 
     std::wstring cacheDir = GetCacheDirectory();
 
-    // Auto-download nvngx_dlssnr.dll (~160 MB ShortFuse model) from RankFTW rhi-repo
+    // The NVIDIA Neural Rendering runtime (nvngx_dlssnr.dll, ~160 MB) is NVIDIA
+    // proprietary. It is deliberately neither bundled nor downloaded by this
+    // installer: the user supplies the 310.8 runtime matching their GPU, exactly
+    // like the upstream OptiScaler-DLSSNR project requires.
     if (fileName == L"nvngx_dlssnr.dll") {
-        wchar_t cachedModel[MAX_PATH];
-        PathCombineW(cachedModel, cacheDir.c_str(), L"nvngx_dlssnr.dll");
-        if (PathFileExistsW(cachedModel)) return std::wstring(cachedModel);
+        static bool s_modelNoticeShown = false;
+        AppendLog(L"[LICENSE] nvngx_dlssnr.dll is not distributed with this package (NVIDIA proprietary).");
+        AppendLog(L"[ACTION] Copy the 310.8 runtime for your GPU next to the game executable, then re-run Install.");
 
-        wchar_t zipDest[MAX_PATH];
-        PathCombineW(zipDest, cacheDir.c_str(), L"nvngx_dlssnr_310.8.SF-v2.zip");
+        if (!s_modelNoticeShown) {
+            s_modelNoticeShown = true;
+            int res = MessageBoxW(g_hMainWnd,
+                L"The NVIDIA Neural Rendering runtime (nvngx_dlssnr.dll) is not bundled or downloaded by this installer "
+                L"for licensing reasons.\n\n"
+                L"Download the 310.8 runtime matching your GPU:\n"
+                L"  - RTX 50: NVIDIA-signed original\n"
+                L"  - RTX 20 / 30 / 40: ShortFuse cross-generation runtime\n\n"
+                L"Place it next to the game executable, then re-run Install / Update.\n\n"
+                L"Open the upstream install guide (hashes, sources)?",
+                L"NVIDIA runtime required (not redistributed)", MB_YESNO | MB_ICONINFORMATION);
 
-        std::wstring url = L"https://github.com/RankFTW/rhi-repo/releases/download/dlssnr-310.8.SF-v2/nvngx_dlssnr_310.8.SF-v2.zip";
-        if (DownloadHttpFile(url, zipDest, L"DLSS 5 Neural Model (nvngx_dlssnr.dll, ~160 MB)")) {
-            ExtractZip(zipDest, cacheDir);
-            DeleteFileW(zipDest);
-            if (PathFileExistsW(cachedModel)) return std::wstring(cachedModel);
+            if (res == IDYES)
+                ShellExecuteW(NULL, L"open",
+                              L"https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/blob/main/INSTALL-DLSSNR.md",
+                              NULL, NULL, SW_SHOWNORMAL);
         }
+        return L"";
     }
 
     // Auto-download OptiScaler Pre-SR package (OptiScaler.dll, nvngx.dll_dlssnr.dll, OptiScaler/ backend) if missing
@@ -531,6 +721,9 @@ void InspectTarget()
     g_dlssVersionStr = L"";
     g_isGameRunning = false;
     g_runningProcessName = L"";
+
+    // Drop a stale NVIDIA runtime selection before reporting status.
+    VerifySelectedModel(true);
 
     if (g_selectedExe.empty() || !PathFileExistsW(g_selectedExe.c_str())) {
         SetWindowTextW(g_hStaticStatus, L"Status: Please select a game executable (*.exe) to analyze.");
@@ -641,6 +834,24 @@ void InspectTarget()
         statusText += L"OptiScaler   : [READY] Will be deployed on install\r\n";
     }
 
+    // NVIDIA Neural Rendering runtime (user-provided, never redistributed).
+    {
+        std::wstring modelShown;
+        if (!g_selectedModel.empty() && PathFileExistsW(g_selectedModel.c_str())) {
+            modelShown = g_selectedModel;
+        } else {
+            wchar_t modelInTarget[MAX_PATH];
+            PathCombineW(modelInTarget, g_targetDir.c_str(), kModelDllName);
+            if (PathFileExistsW(modelInTarget)) modelShown = modelInTarget;
+        }
+
+        if (!modelShown.empty())
+            statusText += L"NVIDIA Runtime: [OK] " + modelShown + L"\r\n";
+        else
+            statusText += L"NVIDIA Runtime: [MISSING] Select your " + std::wstring(kModelDllName) +
+                          L" below (not redistributed)\r\n";
+    }
+
     if (g_isGameRunning) {
         statusText += L"Process      : [RUNNING] " + g_runningProcessName + L" is currently active!\r\n";
     } else {
@@ -667,6 +878,10 @@ void DoInstall()
 {
     AppendLog(L"----------------------------------------------------------------------");
     AppendLog(L"[START] Starting DLSS 5 <> VR Installation (OptiScaler Pre-SR Engine)...");
+
+    // The user's runtime may have been moved/deleted since it was picked.
+    if (VerifySelectedModel(true))
+        AppendLog(L"[MODEL] Using user-provided runtime: " + g_selectedModel);
 
     if (g_isGameRunning) {
         int res = MessageBoxW(g_hMainWnd,
@@ -937,42 +1152,60 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 490, 94, 90, 27, hWnd, (HMENU)IDC_BTN_BROWSE, NULL, NULL);
         SendMessageW(g_hBtnBrowse, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
+        // User-provided NVIDIA Neural Rendering runtime (never redistributed).
+        HWND hLblModel = CreateWindowW(L"STATIC", L"NVIDIA Runtime (nvngx_dlssnr.dll, user-supplied):",
+            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 125, 460, 18, hWnd, NULL, NULL, NULL);
+        SendMessageW(hLblModel, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+
+        g_hEditModel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_VISIBLE | WS_CHILD | ES_AUTOHSCROLL, 20, 143, 460, 25, hWnd, (HMENU)IDC_EDIT_MODEL, NULL, NULL);
+        SendMessageW(g_hEditModel, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+
+        g_hBtnModel = CreateWindowW(L"BUTTON", L"Select file...",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 490, 142, 90, 27, hWnd, (HMENU)IDC_BTN_MODEL, NULL, NULL);
+        SendMessageW(g_hBtnModel, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+
         HWND hGrp = CreateWindowW(L"BUTTON", L"Diagnostics & Detection",
-            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, 20, 130, 560, 160, hWnd, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX, 20, 174, 560, 176, hWnd, NULL, NULL, NULL);
         SendMessageW(hGrp, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hStaticStatus = CreateWindowW(L"STATIC", L"Status: Please select a game executable (*.exe)...",
-            WS_VISIBLE | WS_CHILD | SS_LEFT, 35, 150, 530, 132, hWnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | SS_LEFT, 35, 192, 530, 150, hWnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
         SendMessageW(g_hStaticStatus, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hBtnInstall = CreateWindowW(L"BUTTON", L"Install / Update DLSS 5",
-            WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | WS_DISABLED, 20, 302, 200, 36, hWnd, (HMENU)IDC_BTN_INSTALL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | WS_DISABLED, 20, 358, 200, 36, hWnd, (HMENU)IDC_BTN_INSTALL, NULL, NULL);
         SendMessageW(g_hBtnInstall, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hBtnRestore = CreateWindowW(L"BUTTON", L"Restore LukeRoss Vanilla",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED, 230, 302, 200, 36, hWnd, (HMENU)IDC_BTN_RESTORE, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED, 230, 358, 200, 36, hWnd, (HMENU)IDC_BTN_RESTORE, NULL, NULL);
         SendMessageW(g_hBtnRestore, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hBtnRefresh = CreateWindowW(L"BUTTON", L"Refresh",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 480, 302, 100, 36, hWnd, (HMENU)IDC_BTN_REFRESH, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON, 480, 358, 100, 36, hWnd, (HMENU)IDC_BTN_REFRESH, NULL, NULL);
         SendMessageW(g_hBtnRefresh, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         // Native Windows Progress Bar (Smooth animated)
         g_hProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
-            WS_CHILD | PBS_SMOOTH, 20, 347, 560, 16, hWnd, (HMENU)IDC_PROGRESS_BAR, NULL, NULL);
+            WS_CHILD | PBS_SMOOTH, 20, 400, 560, 16, hWnd, (HMENU)IDC_PROGRESS_BAR, NULL, NULL);
         ShowWindow(g_hProgressBar, SW_HIDE);
 
         HWND hLblLog = CreateWindowW(L"STATIC", L"Activity Log:",
-            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 370, 200, 18, hWnd, NULL, NULL, NULL);
+            WS_VISIBLE | WS_CHILD | SS_LEFT, 20, 424, 200, 18, hWnd, NULL, NULL, NULL);
         SendMessageW(hLblLog, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
         g_hEditLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-            20, 390, 560, 150, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
+            20, 444, 560, 124, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
         SendMessageW(g_hEditLog, WM_SETFONT, (WPARAM)g_hFontMono, TRUE);
 
         AppendLog(std::wstring(L"DLSS 5 <> VR Universal Installer v") + CURRENT_VERSION_STR + L" ready.");
         AppendLog(L"Drag & drop a game executable here or click Browse.");
+        AppendLog(L"Select your own nvngx_dlssnr.dll (NVIDIA runtime) - it is not redistributed by this tool.");
+
+        LoadInstallerSettings();
+        if (!g_selectedExe.empty())
+            InspectTarget();
         break;
     }
 
@@ -991,10 +1224,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     FindClose(hFind);
                 }
             }
-            g_selectedExe = dropped;
-            SetWindowTextW(g_hEditPath, g_selectedExe.c_str());
-            AppendLog(L"[TARGET] Selected: " + g_selectedExe);
-            InspectTarget();
+
+            // Dropping the NVIDIA runtime anywhere in the window selects it.
+            if (_wcsicmp(PathFindFileNameW(dropped), kModelDllName) == 0) {
+                SelectModelFile(hWnd, dropped);
+            } else {
+                g_selectedExe = dropped;
+                SetWindowTextW(g_hEditPath, g_selectedExe.c_str());
+                AppendLog(L"[TARGET] Selected: " + g_selectedExe);
+                SaveInstallerSettings();
+                InspectTarget();
+            }
         }
         DragFinish(hDrop);
         break;
@@ -1020,6 +1260,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_selectedExe = szFile;
                 SetWindowTextW(g_hEditPath, g_selectedExe.c_str());
                 AppendLog(L"[TARGET] Selected: " + g_selectedExe);
+                SaveInstallerSettings();
                 InspectTarget();
             }
         }
@@ -1028,6 +1269,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             GetWindowTextW(g_hEditPath, buf, MAX_PATH);
             g_selectedExe = buf;
             InspectTarget();
+        }
+        else if (wmId == IDC_BTN_MODEL) {
+            wchar_t szModel[MAX_PATH] = L"";
+            OPENFILENAMEW ofnModel;
+            ZeroMemory(&ofnModel, sizeof(ofnModel));
+            ofnModel.lStructSize = sizeof(ofnModel);
+            ofnModel.hwndOwner = hWnd;
+            ofnModel.lpstrFilter = L"NVIDIA Neural Rendering runtime (nvngx_dlssnr.dll)\0nvngx_dlssnr.dll\0DLL Files (*.dll)\0*.dll\0All Files (*.*)\0*.*\0";
+            ofnModel.lpstrFile = szModel;
+            ofnModel.nMaxFile = MAX_PATH;
+            ofnModel.lpstrTitle = L"Select your own nvngx_dlssnr.dll (not redistributed by this tool)";
+            ofnModel.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+            if (GetOpenFileNameW(&ofnModel))
+                SelectModelFile(hWnd, szModel);
+        }
+        else if (wmId == IDC_EDIT_MODEL && wmEvent == EN_CHANGE) {
+            wchar_t buf[MAX_PATH];
+            GetWindowTextW(g_hEditModel, buf, MAX_PATH);
+            if (buf[0] != L'\0') g_selectedModel = buf;
         }
         else if (wmId == IDC_BTN_INSTALL) {
             DoInstall();
@@ -1084,7 +1345,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     RegisterClassExW(&wc);
 
     int w = 620;
-    int h = 600;
+    int h = 650;
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenW - w) / 2;

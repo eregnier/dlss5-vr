@@ -18,8 +18,18 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 1. Download **`DLSS5-VR-Release.zip`** from the [Releases](../../releases) page and extract it anywhere.
 2. Run **`VR-DLSS5-Installer.exe`**.
 3. Drag & drop your game executable onto the window (or click **Browse...**), then click **Install / Update DLSS 5**.
-4. The installer detects the LukeRoss mod and the NGX/DLSS engine, deploys the OptiScaler Pre-SR engine (`OptiScaler.asi`/`OptiScaler.dll`), configures `OptiScaler.ini` for VR (`WorkingScale=0.75`, Pre-SR, Preset 2) and downloads the ~160 MB `nvngx_dlssnr.dll` model automatically when it is missing.
+4. The installer detects the LukeRoss mod and the NGX/DLSS engine, deploys the OptiScaler Pre-SR engine (`OptiScaler.asi`/`OptiScaler.dll`), configures `OptiScaler.ini` for VR (`WorkingScale=0.75`, Pre-SR, Preset 2), and quarantines any legacy competing engine (`WINMM.dll`).
 5. To roll back at any time, click **Restore LukeRoss Vanilla**.
+
+> [!IMPORTANT]
+> **The NVIDIA Neural Rendering runtime (`nvngx_dlssnr.dll`, ~160 MB) is NOT bundled and NOT downloaded by this project** — it is NVIDIA proprietary and must be supplied by the user, as required by the upstream [OptiScaler-DLSSNR install guide](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/blob/main/INSTALL-DLSSNR.md).
+> Obtain the **310.8 runtime** for your GPU (**RTX 50**: NVIDIA-signed original, **RTX 20/30/40**: ShortFuse cross-generation) and give it to the installer:
+> - click **Select file...** (or simply drag & drop the DLL onto the installer window);
+> - the installer validates the file name and computes its **SHA-256**, recognized against the two known 310.8 builds (unknown hashes are accepted with a warning so you stay in control);
+> - the path is **remembered** in `%LOCALAPPDATA%\DLSS5-VR\installer.ini` and reused for every later install/update;
+> - if the file is moved or deleted, the installer detects the stale path, clears it and asks you to pick it again — it never silently skips the model.
+>
+> It is then copied next to the game executable during **Install / Update**. No unofficial mirror is ever contacted.
 
 ### 2. Launch the game and open the VR HUD
 
@@ -46,11 +56,11 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 4. **Select Game**:
    - Drag & drop your game executable onto the installer window, or click **Browse...** to select it (e.g. `Cyberpunk2077.exe`, `Outlaws.exe`, `HogwartsLegacy.exe`, `afop.exe`).
    - *Tip*: If you select an Unreal Engine launcher in the root game folder, the installer automatically detects the real target in `Binaries\Win64`.
-5. **Install / Update**: Click **Install / Update DLSS 5**.
-   - If missing, the ~160 MB neural model (`nvngx_dlssnr.dll`) will be downloaded automatically with live progress.
-   - The installer creates an idempotent, safe swap of LukeRoss's `dxgi.dll` -> `RealVR64.dll`, deploys the OptiScaler Pre-SR engine, and configures `OptiScaler.ini` for locked 72/90 FPS VR.
-6. **Launch & Play**: Start your game normally with your VR headset connected!
-7. **Rollback**: To restore vanilla LukeRoss VR at any time, simply click **Restore LukeRoss Vanilla**.
+5. **NVIDIA Runtime** (one-time): click **Select file...** (or drag & drop the DLL onto the window) and point at your own `nvngx_dlssnr.dll` 310.8 — see the important note above. The installer validates it (name + SHA-256), remembers the path and reuses it for later installs. If it was moved/deleted, it asks for it again instead of skipping.
+6. **Install / Update**: Click **Install / Update DLSS 5**.
+   - The installer creates an idempotent, safe swap of LukeRoss's `dxgi.dll` -> `RealVR64.dll`, deploys the OptiScaler Pre-SR engine, configures `OptiScaler.ini` for locked 72/90 FPS VR, and quarantines a legacy `WINMM.dll` engine when present.
+7. **Launch & Play**: Start your game normally with your VR headset connected!
+8. **Rollback**: To restore vanilla LukeRoss VR at any time, simply click **Restore LukeRoss Vanilla**.
 
 > [!TIP]
 > **Third-Party Launchers (Ubisoft Connect, EA App, etc.)**:
