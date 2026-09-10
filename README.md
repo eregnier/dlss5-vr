@@ -207,6 +207,17 @@ cd C:\code\dlss5-vr\proxy
 dlss5-vr/
 ├── assets/                        # README illustrations (installer & HUD screenshots)
 │
+├── doc/                           # Architecture, diagnostics, field notes & roadmap
+│   ├── 01_ARCHITECTURE_COMPARISON.md
+│   ├── 02_VR_BOTTLENECK_DIAGNOSIS.md
+│   ├── 03_OPTISCALER_PRESR_MULTIPASS.md
+│   ├── 04_DLSS5_AUTOPILOT_ANALYSIS.md
+│   ├── 05_DLSS5_VR_ARCHITECTURE.md
+│   ├── 06_ROADMAP_AND_TRACKING.md
+│   ├── FIELD_NOTES_REX.md
+│   ├── INTEGRATION_GUIDE.md
+│   └── PERF_WORK_NOTES.md
+│
 ├── installer/                     # Native Win32 GUI Installer (~190 KB)
 │   ├── installer.cpp              # Win32 UI, WinINet downloader, safe swap engine
 │   ├── build.bat                  # MSVC compilation script
