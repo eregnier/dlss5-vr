@@ -1,4 +1,4 @@
-# DLSS 5 <> VR : Neural Reconstruction for LukeRoss R.E.A.L. VR
+﻿# DLSS 5 <> VR : Neural Reconstruction for LukeRoss R.E.A.L. VR
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: Windows 64-bit](https://img.shields.io/badge/Platform-Windows%20x64-blue.svg)]()
@@ -9,11 +9,11 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 
 ---
 
-## 🚀 How to Use
+## ðŸš€ How to Use
 
 ### 1. Install the mod
 
-![DLSS 5 <> VR Universal Installer](assets/installer.png)
+![DLSS 5 <> VR Universal Installer](assets/installer-v1.1.0.png)
 
 1. Download **`DLSS5-VR-Release.zip`** from the [Releases](../../releases) page and extract it anywhere.
 2. Run **`VR-DLSS5-Installer.exe`**.
@@ -31,7 +31,7 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 > Give that file to the installer (**Select file...** or drag & drop the DLL onto the window). The installer will:
 > - validate the file name and compute its **SHA-256**, recognized against the two known 310.8 builds (unknown hashes are accepted with a warning so you stay in control);
 > - **remember the path** in `%LOCALAPPDATA%\DLSS5-VR\installer.ini` and reuse it for every later install/update;
-> - detect a moved/deleted file, clear the stale path and ask you to pick it again — it never silently skips the model.
+> - detect a moved/deleted file, clear the stale path and ask you to pick it again â€” it never silently skips the model.
 
 ### 2. Launch the game and open the VR HUD
 
@@ -48,7 +48,7 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 
 ---
 
-## 🚀 Usage & How-To (Quick Start)
+## ðŸš€ Usage & How-To (Quick Start)
 
 ### For End-Users & Players (Binary Release Mode)
 
@@ -58,7 +58,7 @@ Universal C++ dual-proxy and automated toolchain bridging **NVIDIA DLSS 5 Neural
 4. **Select Game**:
    - Drag & drop your game executable onto the installer window, or click **Browse...** to select it (e.g. `Cyberpunk2077.exe`, `Outlaws.exe`, `HogwartsLegacy.exe`, `afop.exe`).
    - *Tip*: If you select an Unreal Engine launcher in the root game folder, the installer automatically detects the real target in `Binaries\Win64`.
-5. **NVIDIA Runtime** (one-time): click **Select file...** (or drag & drop the DLL onto the window) and point at your own `nvngx_dlssnr.dll` 310.8 — see the important note above. The installer validates it (name + SHA-256), remembers the path and reuses it for later installs. If it was moved/deleted, it asks for it again instead of skipping.
+5. **NVIDIA Runtime** (one-time): click **Select file...** (or drag & drop the DLL onto the window) and point at your own `nvngx_dlssnr.dll` 310.8 â€” see the important note above. The installer validates it (name + SHA-256), remembers the path and reuses it for later installs. If it was moved/deleted, it asks for it again instead of skipping.
 6. **Install / Update**: Click **Install / Update DLSS 5**.
    - The installer creates an idempotent, safe swap of LukeRoss's `dxgi.dll` -> `RealVR64.dll`, deploys the OptiScaler Pre-SR engine, configures `OptiScaler.ini` for locked 72/90 FPS VR, and quarantines a legacy `WINMM.dll` engine when present.
 7. **Launch & Play**: Start your game normally with your VR headset connected!
@@ -78,10 +78,10 @@ The DLSS 5 <> VR HUD is rendered via OpenVR as a native 3D compositor overlay (f
 | **Navigate Settings Rows** | `D-Pad Up / Down` | `Up / Down Arrows` |
 | **Adjust Values / Toggle Option** | `D-Pad Left / Right` / `A` | `Left / Right Arrows` (or `Space` / `Enter`) |
 | **Close HUD** | `Select + L3` / Gamepad combo | `Escape` or `F6` |
-| **Toggle Ray Reconstruction** | — | `F8` |
+| **Toggle Ray Reconstruction** | â€” | `F8` |
 | **Cycle HUD Position** | Menu row 6 (`<-` / `->`) or `Y` / `Triangle` | `Tab` |
 | **Cycle HUD Scale** | Menu row 6 (`A`) | `F7` |
-| **OptiScaler Advanced Menu** | — | `Insert` |
+| **OptiScaler Advanced Menu** | â€” | `Insert` |
 | **LukeRoss VR Mod Menu** | Dedicated VR Menu Button | `Numpad 0-9` |
 
 **HUD rows** (all applied live to the running OptiScaler engine through a shared-memory control channel):
@@ -104,7 +104,7 @@ The DLSS 5 <> VR HUD is rendered via OpenVR as a native 3D compositor overlay (f
 
 ---
 
-## 🛠️ Developer Guide
+## ðŸ› ï¸ Developer Guide
 
 ### High-Level Architecture
 
@@ -198,8 +198,8 @@ cd C:\code\dlss5-vr\proxy
 .\deploy.ps1 -GameDir "C:\Program Files (x86)\Steam\steamapps\common\Star Wars Outlaws"
 ```
 3. Watch the logs written next to the game executable:
-   - `vr_dlss5_proxy.log` — proxy: HUD, input paths, control-channel publishes, frame guard
-   - `OptiScaler.log` — engine: Pre-SR placement, live setting applies, per-pass cost
+   - `vr_dlss5_proxy.log` â€” proxy: HUD, input paths, control-channel publishes, frame guard
+   - `OptiScaler.log` â€” engine: Pre-SR placement, live setting applies, per-pass cost
 
 ---
 
@@ -207,45 +207,45 @@ cd C:\code\dlss5-vr\proxy
 
 ```
 dlss5-vr/
-├── assets/                        # README illustrations (installer & HUD screenshots)
-│
-├── doc/                           # Architecture, diagnostics, field notes & roadmap
-│   ├── 01_ARCHITECTURE_COMPARISON.md
-│   ├── 02_VR_BOTTLENECK_DIAGNOSIS.md
-│   ├── 03_OPTISCALER_PRESR_MULTIPASS.md
-│   ├── 04_DLSS5_AUTOPILOT_ANALYSIS.md
-│   ├── 05_DLSS5_VR_ARCHITECTURE.md
-│   ├── 06_ROADMAP_AND_TRACKING.md
-│   ├── FIELD_NOTES_REX.md
-│   ├── INTEGRATION_GUIDE.md
-│   └── PERF_WORK_NOTES.md
-│
-├── installer/                     # Native Win32 GUI Installer (~190 KB)
-│   ├── installer.cpp              # Win32 UI, WinINet downloader, safe swap engine
-│   ├── build.bat                  # MSVC compilation script
-│   └── README.md                  # Installer architecture & swap mechanics
-│
-├── proxy/                         # C++ Dual-Proxy (Core Runtime Component)
-│   ├── proxy.cpp                  # DXGI hooks, OpenVR HUD, MinHook D-Pad filter, GDI Segoe UI
-│   ├── proxy.def                  # 24 standard exports (DXGI + NGX + XInputGetState)
-│   ├── minhook/                   # Bundled lightweight MinHook API hook engine
-│   ├── openvr.h / openvr_api.dll  # Valve OpenVR SDK headers & 64-bit runtime
-│   ├── build.bat                  # MSVC compile script -> dxgi.dll
-│   ├── deploy.ps1                 # Fast hot-deploy PowerShell script
-│   └── README.md                  # Proxy internals & thread model
-│
-├── deps/                          # Redistributable Helper Binaries
-│   ├── OptiScaler.dll             # OptiScaler Pre-SR engine, wilsjo2 v0.7.6 + VR control channel
-│   ├── OptiScaler/                # OptiScaler backends (D3D12, FSR/XeSS, NVFP4 kernels)
-│   ├── OptiScaler.ini             # Default engine configuration
-│   ├── nvngx.dll_dlssnr.dll       # NVIDIA signature forwarder
-│   ├── cudart64_12.dll            # NVIDIA CUDA 12 runtime
-│   └── README.md
-│
-├── package_release.bat            # Automated 1-click CI/CD packaging script (.zip)
-├── VERSION                        # Current SemVer release (e.g. 1.1.0)
-├── LICENSE                        # MIT License + Third-Party Notices
-└── README.md                      # This document
+â”œâ”€â”€ assets/                        # README illustrations (installer & HUD screenshots)
+â”‚
+â”œâ”€â”€ doc/                           # Architecture, diagnostics, field notes & roadmap
+â”‚   â”œâ”€â”€ 01_ARCHITECTURE_COMPARISON.md
+â”‚   â”œâ”€â”€ 02_VR_BOTTLENECK_DIAGNOSIS.md
+â”‚   â”œâ”€â”€ 03_OPTISCALER_PRESR_MULTIPASS.md
+â”‚   â”œâ”€â”€ 04_DLSS5_AUTOPILOT_ANALYSIS.md
+â”‚   â”œâ”€â”€ 05_DLSS5_VR_ARCHITECTURE.md
+â”‚   â”œâ”€â”€ 06_ROADMAP_AND_TRACKING.md
+â”‚   â”œâ”€â”€ FIELD_NOTES_REX.md
+â”‚   â”œâ”€â”€ INTEGRATION_GUIDE.md
+â”‚   â””â”€â”€ PERF_WORK_NOTES.md
+â”‚
+â”œâ”€â”€ installer/                     # Native Win32 GUI Installer (~190 KB)
+â”‚   â”œâ”€â”€ installer.cpp              # Win32 UI, WinINet downloader, safe swap engine
+â”‚   â”œâ”€â”€ build.bat                  # MSVC compilation script
+â”‚   â””â”€â”€ README.md                  # Installer architecture & swap mechanics
+â”‚
+â”œâ”€â”€ proxy/                         # C++ Dual-Proxy (Core Runtime Component)
+â”‚   â”œâ”€â”€ proxy.cpp                  # DXGI hooks, OpenVR HUD, MinHook D-Pad filter, GDI Segoe UI
+â”‚   â”œâ”€â”€ proxy.def                  # 24 standard exports (DXGI + NGX + XInputGetState)
+â”‚   â”œâ”€â”€ minhook/                   # Bundled lightweight MinHook API hook engine
+â”‚   â”œâ”€â”€ openvr.h / openvr_api.dll  # Valve OpenVR SDK headers & 64-bit runtime
+â”‚   â”œâ”€â”€ build.bat                  # MSVC compile script -> dxgi.dll
+â”‚   â”œâ”€â”€ deploy.ps1                 # Fast hot-deploy PowerShell script
+â”‚   â””â”€â”€ README.md                  # Proxy internals & thread model
+â”‚
+â”œâ”€â”€ deps/                          # Redistributable Helper Binaries
+â”‚   â”œâ”€â”€ OptiScaler.dll             # OptiScaler Pre-SR engine, wilsjo2 v0.7.6 + VR control channel
+â”‚   â”œâ”€â”€ OptiScaler/                # OptiScaler backends (D3D12, FSR/XeSS, NVFP4 kernels)
+â”‚   â”œâ”€â”€ OptiScaler.ini             # Default engine configuration
+â”‚   â”œâ”€â”€ nvngx.dll_dlssnr.dll       # NVIDIA signature forwarder
+â”‚   â”œâ”€â”€ cudart64_12.dll            # NVIDIA CUDA 12 runtime
+â”‚   â””â”€â”€ README.md
+â”‚
+â”œâ”€â”€ package_release.bat            # Automated 1-click CI/CD packaging script (.zip)
+â”œâ”€â”€ VERSION                        # Current SemVer release (e.g. 1.1.0)
+â”œâ”€â”€ LICENSE                        # MIT License + Third-Party Notices
+â””â”€â”€ README.md                      # This document
 ```
 
 
