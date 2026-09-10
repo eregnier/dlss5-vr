@@ -41,3 +41,6 @@ DLSS5oneclick/
 optiscaler-dlssnr/
 RealConfig.bat
 RealRepo.7z
+
+# Build artifacts are never versioned (rebuilt by package_release.bat)
+*.exe
