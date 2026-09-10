@@ -58,12 +58,10 @@ The DLSS 5 <> VR HUD is rendered via OpenVR as a native 3D compositor overlay (f
 | 6 | **VR HUD Display** (position & scale) | `<-` / `->` position, `A` scale |
 
 > [!NOTE]
-> **Smart D-Pad Isolation (XInput + HID)**:
-> When the HUD menu is active, D-Pad directional inputs are intercepted before the game sees them. Two paths are covered:
-> - **XInput pads** (`XINPUT1_4`, `XINPUT9_1_0`, `XINPUT1_3`, including the RealVR64 thunks and IAT rewrites): D-Pad bits are masked by thread-aware MinHook detours.
-> - **HID pads** read through the Windows HID parser (Cyberpunk's native DualSense-class path): `HidP_GetData` results have the D-Pad hat switch forced to its centred value.
+> **D-Pad Isolation (XInput)**:
+> When the HUD menu is active, D-Pad bits are masked by thread-aware MinHook detours on `XINPUT1_4`, `XINPUT1_3`, `XINPUT9_1_0` and on the RealVR64 XInput thunk captured by the proxy, plus the `joyGetPosEx` POV hat. Movement sticks, face buttons, bumpers and triggers stay fully active.
 >
-> You can freely walk with the left analog stick, aim/look around with the right stick, jump, and shoot without accidentally triggering in-game D-pad consumables, potions, or quick inventory slots while adjusting DLSS 5 parameters. Once the menu is closed, D-Pad inputs are immediately restored to the game.
+> **Known limitation**: pads that the game reads outside XInput (for example Cyberpunk's native DualSense-class path through Windows Raw Input / the HID parser) are not masked yet. In that configuration the HUD still navigates through the same captured reader but the game can also see the D-Pad. Masking at the Raw Input/HID layer is prototyped and intentionally deferred to a later release so the working `Select+L3` binding stays stable.
 
 ---
 
@@ -82,7 +80,7 @@ graph TD
     Forwarder -->|Neural Inferences at Pre-SR scale| Model[nvngx_dlssnr.dll<br/>DLSS 5 Model]
     Proxy -->|Shared memory control block| OptiScaler
     Proxy -->|OpenVR Compositor Overlay + Event Pump| HUD[In-Game 3D Overlay & HUD<br/>Segoe UI Vector Render]
-    Proxy -->|MinHook XInput Detours + RealVR Thunks + IAT + HID Hat Masking| Input[Gamepad D-Pad Filter<br/>Game input masked during HUD]
+    Proxy -->|MinHook XInput Detours + RealVR64 Thunk Patch| Input[Gamepad D-Pad Filter<br/>Game input masked during HUD]
     Proxy -->|Exports 24 System Symbols| DXGI[C:\Windows\System32\dxgi.dll]
 ```
 
@@ -97,8 +95,8 @@ graph TD
    Samples SteamVR compositor frame timing (`IVRCompositor::GetFrameTiming`, per-frame GPU ms + present count) and only acts after ~1.5 s of sustained pressure. When the budget is threatened it drops `WorkingScale` one notch and pushes the change live to OptiScaler, safeguarding against ASW/reprojection cliffs.
 5. **OpenVR Compositor Overlay with Self-Healing Auto-Recovery**:
    Renders a vector-crisp Segoe UI overlay directly through OpenVR (`IVROverlay::SetOverlayRaw`). Continuously drains the OpenVR IPC event queue via `PollNextOverlayEvent()` to prevent buffer saturation (OpenVR error 23 / `VROverlayError_RequestFailed`), and features automatic self-healing recovery that seamlessly recreates the overlay handle if SteamVR resets or enters standby. A per-PID overlay key and a retry backoff keep auxiliary child processes from colliding with the game's overlay.
-6. **XInput + HID D-Pad Isolation**:
-   Hooks `XInputGetState` (named and ordinal 100 `XInputGetStateEx`) on `XINPUT1_4.dll`, `XINPUT1_3.dll`, `XINPUT9_1_0.dll`, `joyGetPosEx`, the RealVR64 `FF 25` XInput thunks (all slots, re-validated every second) and the game's own IAT slots. Games that read the pad through the Windows HID parser (Cyberpunk's native DualSense-class path) are covered by neutralising the D-Pad hat switch inside `HidP_GetData` while the HUD is open. Thread-aware filtering guarantees the HUD thread always receives unmasked controller input.
+6. **XInput D-Pad Isolation**:
+   Thread-aware MinHook detours on `XInputGetState` (`XINPUT1_4`, `XINPUT1_3`, `XINPUT9_1_0`) and `joyGetPosEx`, plus a single-slot patch of the RealVR64 XInput thunk (`E9 -> FF 25 [slot]`, re-applied if RealVR64 rebuilds it, re-validated every second). The captured RealVR64 target is also what feeds the HUD watcher, which is what keeps the `Select+L3` binding reliable. Pads read outside XInput (Raw Input / HID parser, e.g. Cyberpunk's DualSense path) are detected but intentionally not masked yet.
 7. **Live OptiScaler Control Channel**:
    OptiScaler only reads `OptiScaler.ini` at startup, so the HUD publishes every change (Enabled, WorkingScale, RunBeforeSR, ResidualAcrossRR, Preset, Intensity, Style) through a `Local\VRDLSS5_Control_1_<pid>` shared-memory block. The bundled patched OptiScaler build (`deps/OptiScaler.dll`, wilsjo2 v0.7.6 + control channel) applies changes to its live Config and acknowledges them; the INI remains the persistent store.
 
@@ -205,6 +203,7 @@ dlss5-vr/
 ├── tools/                         # Developer Live Diagnostics (Python)
 │   ├── diag.py                    # Process RAM hooks & injection inspector
 │   ├── tail_log.py                # Dual log tailer (proxy + OptiScaler + LukeRoss)
+│   ├── live_probe.py              # One-command live probe of a running session
 │   ├── dlss5_binary_inspector.py  # PE / CUDA / signature inspector
 │   ├── optiscaler_vr_configurator.py # Cyberpunk VR INI generator
 │   ├── vr_perf_simulator.py       # RunBeforeSR/WorkingScale cost model

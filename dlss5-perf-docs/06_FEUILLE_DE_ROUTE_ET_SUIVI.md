@@ -71,6 +71,7 @@ flowchart LR
 | **10/09/2026** | **D-Pad lu via le parseur HID** | Cyberpunk (pad type DualSense) lit le D-Pad via `HidP_GetData` (~250 appels/s, `dpadSeen=0` côté XInput) : neutralisation du hat switch (usage 0x39) dans le proxy pendant que le HUD est ouvert, en plus des hooks XInput/RealVR/IAT. |
 | **10/09/2026** | **Frame Guard basé sur SteamVR** | Le compteur NGX n'est pas sur le chemin de Cyberpunk (Streamline) : le guard lit désormais `IVRCompositor::GetFrameTiming` et n'agit qu'après ~1,5 s de tension soutenue. |
 | **10/09/2026** | **Processus annexes isolés** | `REDEngineErrorReporter.exe` chargeait aussi le proxy (collision de clé overlay, 3576 erreurs) : les processus auxiliaires ne créent plus d'overlay ni de hooks, clé d'overlay par PID + backoff. |
+| **10/09/2026** | **D-Pad hors XInput : revert assumé** | Le pad de test (type DualSense) est lu par Cyberpunk via Raw Input (`GetRawInputData`) et non par XInput. Les tentatives de masquage HID/Raw Input/IAT ont cassé le binding `Select+L3` : tout a été reverté (commit `revert(input)`), le binding repasse par la cible RealVR64 capturée. Le masquage hors XInput est documenté comme limitation connue et reporté. |
 
 ---
 
@@ -91,6 +92,6 @@ flowchart LR
 
 - Fork OptiScaler wilsjo2 v0.7.6 rebuildé avec canal de contrôle live (`deps/OptiScaler.dll`).
 - HUD 7 lignes : Neural Engine, **DLSS5 Detail** (Intensity 0→2), **DLSS5 Style**, WorkingScale, Preset, Placement, VR HUD Display (position/scale). Ray Reconstruction sur `F8`, plus de raccourci `R3`.
-- Isolation D-Pad multi-couches : hooks XInput, thunks RealVR64, IAT du jeu, et **hat switch HID** pour les pads lus via le parseur Windows.
+- Isolation D-Pad **XInput uniquement** : hooks `XInputGetState`/`joyGetPosEx` + patch single-slot du thunk RealVR64 (cible capturée réutilisée par le watcher, ce qui rend `Select+L3` fiable). Le masquage Raw Input / parseur HID (pads type DualSense lus hors XInput) a été prototypé puis **reverté** : il cassait le binding et reste à reprendre dans une passe dédiée.
 - Frame Guard SteamVR (`IVRCompositor::GetFrameTiming`) avec pilotage live du `WorkingScale` et hystérésis ~1,5 s.
 - Correctifs robustesse : quarantaine du moteur concurrent `WINMM.dll`, processus annexes ignorés, overlay par PID avec backoff, `WorkingScale` par défaut 0.75.

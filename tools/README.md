@@ -4,6 +4,7 @@ Ce répertoire regroupe les scripts Python d'analyse, d'instrumentation et d'aud
 
 ## Utilitaires Python
 
+- **`live_probe.py`** : Sonde live d'une session en cours en une commande (modules, chaînes de hooks `XInputGetState`, IAT du jeu, bloc de contrôle partagé OptiScaler, tail filtré du log proxy ; `--follow` pour suivre en continu). C'est l'outil à utiliser pour diagnostiquer sans relancer le jeu.
 - **`diag.py`** : Diagnostic complet de l'environnement de jeu en cours (processus, hooks, offsets de patch en RAM, détection RealVR / RenoDX).
 - **`tail_log.py`** : Surveillance en temps réel des journaux d'exécution ReShade et LukeRoss.
 - **`analyze_eval.py`** : Analyseur du flux d'évaluation continue de RenoDX et des points d'interception D3D12.
